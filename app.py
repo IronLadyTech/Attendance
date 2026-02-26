@@ -219,7 +219,28 @@ if zoom_emails or zoom_names:
                 spreadsheet = gc.open_by_key(sheet_url.strip())
 
             ws = spreadsheet.worksheet(tab_name)
-            sheet_data = pd.DataFrame(ws.get_all_records())
+
+            # Use get_all_values to handle duplicate/empty headers
+            all_values = ws.get_all_values()
+            if len(all_values) < 2:
+                st.warning("⚠️ Worksheet is empty or has no data rows.")
+                sheet_data = pd.DataFrame()
+            else:
+                headers = all_values[0]
+                # Make headers unique: append _2, _3 etc. for duplicates, name empty cols
+                seen = {}
+                unique_headers = []
+                for i, h in enumerate(headers):
+                    h = h.strip()
+                    if not h:
+                        h = f"_unnamed_{i}"
+                    if h in seen:
+                        seen[h] += 1
+                        unique_headers.append(f"{h}_{seen[h]}")
+                    else:
+                        seen[h] = 1
+                        unique_headers.append(h)
+                sheet_data = pd.DataFrame(all_values[1:], columns=unique_headers)
 
             if sheet_data.empty:
                 st.warning("⚠️ Worksheet is empty or has no header row.")
