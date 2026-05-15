@@ -1,0 +1,7 @@
+# Optional Railway config. Dockerfile in repo root is auto-detected.
+# https://docs.railway.com/reference/config-as-code
+
+[deploy]
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"

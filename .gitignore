@@ -1,0 +1,13 @@
+# Secrets — do not commit
+credentials.json
+zoom_config.json
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+venv/
+.env
+.env.*
