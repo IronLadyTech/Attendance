@@ -2,23 +2,27 @@
 """
 Zoom webhook bridge with 5-minute presence timer and Day 2 completion handler.
 
+All outgoing calls go to the single ZOHO_WEBHOOK_FORWARD_URL.
+The Zoho Flow branches on the "event" field:
+  - "attendance.mark_yes" → call mark_attendance_yes
+  - "meeting.ended"       → call mark_mc_completed
+  - anything else         → existing logic
+
 How it works:
   - meeting.participant_joined  → start a 5-min timer for that person
   - meeting.participant_left    → cancel their timer (left too early)
-  - timer fires (still present) → POST mark-yes payload to ZOHO_MARK_YES_URL
-  - meeting.ended (Day 2 topic) → POST start_time to ZOHO_MARK_COMPLETED_URL
+  - timer fires (still present) → POST {"event":"attendance.mark_yes", ...} to Zoho
+  - meeting.ended (Day 2 topic) → POST {"event":"meeting.ended", ...} to Zoho
   - endpoint.url_validation     → answer Zoom's HMAC challenge
-  - all other events            → forward to ZOHO_WEBHOOK_FORWARD_URL as before
+  - all other Zoom events       → forward as-is to Zoho
 
 Environment variables required:
-  ZOOM_WEBHOOK_SECRET_TOKEN   — Zoom app Secret Token (webhooks section)
-  ZOHO_WEBHOOK_FORWARD_URL    — existing Zoho Flow webhook (for other events)
-  ZOHO_MARK_YES_URL           — Zoho Flow webhook that calls mark_attendance_yes
-  ZOHO_MARK_COMPLETED_URL     — Zoho Flow webhook that calls mark_mc_completed
+  ZOOM_WEBHOOK_SECRET_TOKEN  — Zoom app Secret Token (webhooks section)
+  ZOHO_WEBHOOK_FORWARD_URL   — single Zoho Flow webhook URL (handles all events)
 
 Optional:
-  PRESENCE_SECONDS            — seconds before marking Yes (default: 300 = 5 min)
-  PORT                        — listen port (default: 8080, Render sets this)
+  PRESENCE_SECONDS           — seconds before marking Yes (default: 300 = 5 min)
+  PORT                       — listen port (default: 8080, Render sets this)
 """
 from __future__ import annotations
 
@@ -67,31 +71,32 @@ def _timer_key(meeting_id: str, email: str) -> str:
     return f"{meeting_id}:{email.lower().strip()}"
 
 
-def _mark_attendance(mark_yes_url: str, meeting_id: str, email: str, name: str, topic: str, join_time: str) -> None:
+def _post_to_zoho(forward_url: str, payload: dict, label: str) -> None:
+    try:
+        r = requests.post(forward_url, json=payload, timeout=30)
+        sys.stderr.write(f"[{label}] Zoho response: {r.status_code}\n")
+    except requests.RequestException as e:
+        sys.stderr.write(f"[{label}] ERROR posting to Zoho: {e}\n")
+
+
+def _mark_attendance(forward_url: str, meeting_id: str, email: str, name: str, topic: str, join_time: str) -> None:
     """Called by timer thread when participant has been present for PRESENCE_SECONDS."""
     key = _timer_key(meeting_id, email)
     with _timers_lock:
         _timers.pop(key, None)
 
-    payload = {
+    sys.stderr.write(f"[timer] {_PRESENCE_SECONDS}s elapsed — marking Yes: email={email} meeting={meeting_id}\n")
+    _post_to_zoho(forward_url, {
         "event": "attendance.mark_yes",
         "meeting_id": meeting_id,
         "participant_email": email,
         "participant_name": name,
         "meeting_topic": topic,
         "join_time": join_time,
-    }
-    sys.stderr.write(
-        f"[timer] {_PRESENCE_SECONDS}s elapsed — marking Yes: email={email} meeting={meeting_id}\n"
-    )
-    try:
-        r = requests.post(mark_yes_url, json=payload, timeout=30)
-        sys.stderr.write(f"[timer] Zoho response: {r.status_code}\n")
-    except requests.RequestException as e:
-        sys.stderr.write(f"[timer] ERROR posting to Zoho: {e}\n")
+    }, "timer")
 
 
-def _handle_participant_joined(body: dict, mark_yes_url: str) -> None:
+def _handle_participant_joined(body: dict, forward_url: str) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
@@ -106,7 +111,6 @@ def _handle_participant_joined(body: dict, mark_yes_url: str) -> None:
 
     key = _timer_key(meeting_id, email)
     with _timers_lock:
-        # Cancel any existing timer for this person (handles rejoin)
         existing = _timers.pop(key, None)
         if existing:
             existing.cancel()
@@ -115,42 +119,13 @@ def _handle_participant_joined(body: dict, mark_yes_url: str) -> None:
         t = threading.Timer(
             _PRESENCE_SECONDS,
             _mark_attendance,
-            args=[mark_yes_url, meeting_id, email, name, topic, join_time],
+            args=[forward_url, meeting_id, email, name, topic, join_time],
         )
         t.daemon = True
         t.start()
         _timers[key] = t
 
-    sys.stderr.write(
-        f"[join] Timer started — {email} must stay {_PRESENCE_SECONDS}s to be marked Yes (meeting={meeting_id})\n"
-    )
-
-
-def _handle_meeting_ended(body: dict, mark_completed_url: str) -> None:
-    obj = body.get("payload", {}).get("object", {})
-    topic = obj.get("topic", "")
-    start_time = obj.get("start_time", "")
-    meeting_id = str(obj.get("id", ""))
-
-    topic_lower = topic.lower()
-    is_day2 = any(kw in topic_lower for kw in _DAY2_KEYWORDS)
-
-    if not is_day2:
-        sys.stderr.write(f"[ended] Not a Day 2 meeting (topic={topic!r}) — skipping\n")
-        return
-
-    sys.stderr.write(f"[ended] Day 2 meeting ended — triggering mark_mc_completed (meeting={meeting_id})\n")
-    payload = {
-        "event": "meeting.ended",
-        "meeting_id": meeting_id,
-        "start_time": start_time,
-        "topic": topic,
-    }
-    try:
-        r = requests.post(mark_completed_url, json=payload, timeout=30)
-        sys.stderr.write(f"[ended] Zoho response: {r.status_code}\n")
-    except requests.RequestException as e:
-        sys.stderr.write(f"[ended] ERROR posting to Zoho: {e}\n")
+    sys.stderr.write(f"[join] Timer started — {email} must stay {_PRESENCE_SECONDS}s (meeting={meeting_id})\n")
 
 
 def _handle_participant_left(body: dict) -> None:
@@ -173,17 +148,35 @@ def _handle_participant_left(body: dict) -> None:
         sys.stderr.write(f"[left] No active timer for {email} (already marked or never joined)\n")
 
 
+def _handle_meeting_ended(body: dict, forward_url: str) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    topic = obj.get("topic", "")
+    start_time = obj.get("start_time", "")
+    meeting_id = str(obj.get("id", ""))
+
+    is_day2 = any(kw in topic.lower() for kw in _DAY2_KEYWORDS)
+    if not is_day2:
+        sys.stderr.write(f"[ended] Not a Day 2 meeting (topic={topic!r}) — skipping\n")
+        return
+
+    sys.stderr.write(f"[ended] Day 2 ended — triggering mark_mc_completed (meeting={meeting_id})\n")
+    _post_to_zoho(forward_url, {
+        "event": "meeting.ended",
+        "meeting_id": meeting_id,
+        "start_time": start_time,
+        "topic": topic,
+    }, "ended")
+
+
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """Handles each request in a separate thread so timers can fire concurrently."""
     daemon_threads = True
 
 
-def make_handler(secret: str, forward_url: str, mark_yes_url: str, mark_completed_url: str):
+def make_handler(secret: str, forward_url: str):
     class H(BaseHTTPRequestHandler):
         _secret = secret
         _forward_url = forward_url
-        _mark_yes_url = mark_yes_url
-        _mark_completed_url = mark_completed_url
 
         def log_message(self, fmt: str, *args) -> None:
             sys.stderr.write(fmt % args + "\n")
@@ -220,23 +213,23 @@ def make_handler(secret: str, forward_url: str, mark_yes_url: str, mark_complete
 
             # Participant joined → start presence timer
             if event == "meeting.participant_joined":
-                _handle_participant_joined(body, self._mark_yes_url)
+                _handle_participant_joined(body, self._forward_url)
                 self._ok()
                 return
 
-            # Participant left → cancel timer (they left before threshold)
+            # Participant left → cancel timer
             if event == "meeting.participant_left":
                 _handle_participant_left(body)
                 self._ok()
                 return
 
-            # Meeting ended → trigger mark_mc_completed if Day 2 topic
+            # Meeting ended → trigger mark_mc_completed if Day 2
             if event == "meeting.ended":
-                _handle_meeting_ended(body, self._mark_completed_url)
+                _handle_meeting_ended(body, self._forward_url)
                 self._ok()
                 return
 
-            # All other events → forward to Zoho as before
+            # All other events → forward as-is to Zoho
             self._forward(raw)
 
         def _ok(self) -> None:
@@ -266,7 +259,7 @@ def make_handler(secret: str, forward_url: str, mark_yes_url: str, mark_complete
         def do_GET(self) -> None:
             with _timers_lock:
                 active = len(_timers)
-            body = json.dumps({
+            resp = json.dumps({
                 "ok": True,
                 "service": "zoom_webhook_bridge",
                 "active_timers": active,
@@ -275,7 +268,7 @@ def make_handler(secret: str, forward_url: str, mark_yes_url: str, mark_complete
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(resp)
 
     return H
 
@@ -284,20 +277,12 @@ def main() -> None:
     _load_dotenv()
     secret = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN", "").strip()
     forward = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL", "").strip()
-    mark_yes = os.environ.get("ZOHO_MARK_YES_URL", "").strip()
-    mark_completed = os.environ.get("ZOHO_MARK_COMPLETED_URL", "").strip()
 
     if not secret:
         print("ERROR: Set ZOOM_WEBHOOK_SECRET_TOKEN", file=sys.stderr)
         sys.exit(1)
     if not forward:
         print("ERROR: Set ZOHO_WEBHOOK_FORWARD_URL", file=sys.stderr)
-        sys.exit(1)
-    if not mark_yes:
-        print("ERROR: Set ZOHO_MARK_YES_URL", file=sys.stderr)
-        sys.exit(1)
-    if not mark_completed:
-        print("ERROR: Set ZOHO_MARK_COMPLETED_URL (Zoho Flow webhook for mark_mc_completed)", file=sys.stderr)
         sys.exit(1)
 
     p = argparse.ArgumentParser()
@@ -306,20 +291,18 @@ def main() -> None:
     p.add_argument("--port", type=int, default=default_port)
     args = p.parse_args()
 
-    handler = make_handler(secret, forward, mark_yes, mark_completed)
+    handler = make_handler(secret, forward)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
-        f"Presence threshold  : {_PRESENCE_SECONDS}s ({_PRESENCE_SECONDS // 60}m)\n"
-        f"Day 2 keywords      : {_DAY2_KEYWORDS}\n"
-        f"Forward URL         : {forward}\n"
-        f"Mark-Yes URL        : {mark_yes}\n"
-        f"Mark-Completed URL  : {mark_completed}\n"
-        "participant_joined  → timer started\n"
-        "participant_left    → timer cancelled\n"
-        "timer fires         → POST mark_yes to Zoho\n"
-        "meeting.ended (D2)  → POST mark_completed to Zoho\n"
-        "other events        → forwarded to Zoho",
+        f"Presence threshold : {_PRESENCE_SECONDS}s ({_PRESENCE_SECONDS // 60}m)\n"
+        f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
+        f"Forward URL        : {forward}\n"
+        "participant_joined → timer started\n"
+        "participant_left   → timer cancelled\n"
+        "timer fires        → POST attendance.mark_yes to Zoho\n"
+        "meeting.ended (D2) → POST meeting.ended to Zoho\n"
+        "other events       → forwarded as-is to Zoho",
         flush=True,
     )
     server.serve_forever()
