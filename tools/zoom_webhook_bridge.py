@@ -10,7 +10,7 @@ The Zoho Flow branches on the "event" field:
 
 How it works:
   - meeting.participant_joined  → start a 5-min timer for that person
-  - meeting.participant_left    → cancel their timer (left too early)
+  - meeting.participant_left    → cancel timer + POST {"event":"attendance.mark_no", ...} to Zoho
   - timer fires (still present) → POST {"event":"attendance.mark_yes", ...} to Zoho
   - meeting.ended (Day 2 topic) → POST {"event":"meeting.ended", ...} to Zoho
   - endpoint.url_validation     → answer Zoom's HMAC challenge
@@ -128,11 +128,13 @@ def _handle_participant_joined(body: dict, forward_url: str) -> None:
     sys.stderr.write(f"[join] Timer started — {email} must stay {_PRESENCE_SECONDS}s (meeting={meeting_id})\n")
 
 
-def _handle_participant_left(body: dict) -> None:
+def _handle_participant_left(body: dict, forward_url: str) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
     email = participant.get("email", "").strip()
+    name = participant.get("user_name", "").strip()
+    topic = obj.get("topic", "")
 
     if not email or not meeting_id:
         return
@@ -143,7 +145,14 @@ def _handle_participant_left(body: dict) -> None:
 
     if timer:
         timer.cancel()
-        sys.stderr.write(f"[left] Timer cancelled — {email} left before {_PRESENCE_SECONDS}s\n")
+        sys.stderr.write(f"[left] Timer cancelled — {email} left before {_PRESENCE_SECONDS}s → marking No\n")
+        _post_to_zoho(forward_url, {
+            "event": "attendance.mark_no",
+            "meeting_id": meeting_id,
+            "participant_email": email,
+            "participant_name": name,
+            "meeting_topic": topic,
+        }, "left-early")
     else:
         sys.stderr.write(f"[left] No active timer for {email} (already marked or never joined)\n")
 
@@ -217,9 +226,9 @@ def make_handler(secret: str, forward_url: str):
                 self._ok()
                 return
 
-            # Participant left → cancel timer
+            # Participant left → cancel timer + mark No
             if event == "meeting.participant_left":
-                _handle_participant_left(body)
+                _handle_participant_left(body, self._forward_url)
                 self._ok()
                 return
 
@@ -299,7 +308,7 @@ def main() -> None:
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
         f"Forward URL        : {forward}\n"
         "participant_joined → timer started\n"
-        "participant_left   → timer cancelled\n"
+        "participant_left   → timer cancelled + POST attendance.mark_no to Zoho\n"
         "timer fires        → POST attendance.mark_yes to Zoho\n"
         "meeting.ended (D2) → POST meeting.ended to Zoho\n"
         "other events       → forwarded as-is to Zoho",
