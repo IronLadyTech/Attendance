@@ -33,6 +33,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
@@ -48,6 +49,8 @@ _DAY2_KEYWORDS = ["art of war", "shameless pitching"]
 
 # Thread-safe registry: timer_key -> threading.Timer
 _timers: dict[str, threading.Timer] = {}
+# Tracks wall-clock join time so we can calculate duration on leave
+_join_timestamps: dict[str, float] = {}
 _timers_lock = threading.Lock()
 
 
@@ -116,6 +119,8 @@ def _handle_participant_joined(body: dict, forward_url: str) -> None:
             existing.cancel()
             sys.stderr.write(f"[join] Cancelled previous timer for {email} (rejoin)\n")
 
+        _join_timestamps[key] = time.time()
+
         t = threading.Timer(
             _PRESENCE_SECONDS,
             _mark_attendance,
@@ -142,17 +147,31 @@ def _handle_participant_left(body: dict, forward_url: str) -> None:
     key = _timer_key(meeting_id, email)
     with _timers_lock:
         timer = _timers.pop(key, None)
+        joined_ts = _join_timestamps.pop(key, None)
+
+    duration_seconds = int(time.time() - joined_ts) if joined_ts else 0
 
     if timer:
         timer.cancel()
-        sys.stderr.write(f"[left] Timer cancelled — {email} left before {_PRESENCE_SECONDS}s → marking No\n")
+        sys.stderr.write(f"[left] Timer cancelled — {email} left before {_PRESENCE_SECONDS}s ({duration_seconds}s) → marking No\n")
         _post_to_zoho(forward_url, {
             "event": "attendance.mark_no",
             "meeting_id": meeting_id,
             "participant_email": email,
             "participant_name": name,
             "meeting_topic": topic,
+            "duration_seconds": duration_seconds,
         }, "left-early")
+    elif duration_seconds > 0:
+        sys.stderr.write(f"[left] Already marked Yes — {email} total {duration_seconds}s → updating duration\n")
+        _post_to_zoho(forward_url, {
+            "event": "attendance.update_duration",
+            "meeting_id": meeting_id,
+            "participant_email": email,
+            "participant_name": name,
+            "meeting_topic": topic,
+            "duration_seconds": duration_seconds,
+        }, "left-update-duration")
     else:
         sys.stderr.write(f"[left] No active timer for {email} (already marked or never joined)\n")
 
