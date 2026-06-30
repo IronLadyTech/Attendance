@@ -4,15 +4,16 @@ Zoom webhook bridge with 5-minute presence timer and Day 2 completion handler.
 
 All outgoing calls go to the single ZOHO_WEBHOOK_FORWARD_URL.
 The Zoho Flow branches on the "event" field:
-  - "attendance.mark_yes" → call mark_attendance_yes
-  - "meeting.ended"       → call mark_mc_completed
-  - anything else         → existing logic
+  - "attendance.mark_yes"       → call mark_attendance_yes
+  - "attendance.mark_no"        → call mark_attendance_no
+  - "attendance.update_duration"→ optional (no Flow branch required)
+  - "meeting.ended"             → set_blank + mark_mc_completed (Day 1 / Day 2)
 
 How it works:
   - meeting.participant_joined  → start a 5-min timer for that person
   - meeting.participant_left    → cancel timer + POST {"event":"attendance.mark_no", ...} to Zoho
   - timer fires (still present) → POST {"event":"attendance.mark_yes", ...} to Zoho
-  - meeting.ended (Day 2 topic) → POST {"event":"meeting.ended", ...} to Zoho
+  - meeting.ended (Day 1 or Day 2 topic) → POST {"event":"meeting.ended", ...} to Zoho
   - endpoint.url_validation     → answer Zoom's HMAC challenge
   - all other Zoom events       → forward as-is to Zoho
 
@@ -44,8 +45,10 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Seconds a participant must be present before attendance is marked Yes
 _PRESENCE_SECONDS = int(os.environ.get("PRESENCE_SECONDS", "300"))
 
-# Topic keywords that identify a Day 2 meeting (case-insensitive)
+# Topic keywords that identify MC sessions (case-insensitive)
+_DAY1_KEYWORDS = ["bhag", "breakthrough actions"]
 _DAY2_KEYWORDS = ["art of war", "shameless pitching"]
+_MC_MEETING_KEYWORDS = _DAY1_KEYWORDS + _DAY2_KEYWORDS
 
 # Thread-safe registry: timer_key -> threading.Timer
 _timers: dict[str, threading.Timer] = {}
@@ -182,17 +185,20 @@ def _handle_meeting_ended(body: dict, forward_url: str) -> None:
     start_time = obj.get("start_time", "")
     meeting_id = str(obj.get("id", ""))
 
-    is_day2 = any(kw in topic.lower() for kw in _DAY2_KEYWORDS)
-    if not is_day2:
-        sys.stderr.write(f"[ended] Not a Day 2 meeting (topic={topic!r}) — skipping\n")
+    topic_l = topic.lower()
+    is_mc = any(kw in topic_l for kw in _MC_MEETING_KEYWORDS)
+    if not is_mc:
+        sys.stderr.write(f"[ended] Not an MC meeting (topic={topic!r}) — skipping\n")
         return
 
-    sys.stderr.write(f"[ended] Day 2 ended — triggering mark_mc_completed (meeting={meeting_id})\n")
+    day_label = "Day 2" if any(kw in topic_l for kw in _DAY2_KEYWORDS) else "Day 1"
+    sys.stderr.write(f"[ended] {day_label} ended — posting meeting.ended (meeting={meeting_id})\n")
     _post_to_zoho(forward_url, {
         "event": "meeting.ended",
         "meeting_id": meeting_id,
         "start_time": start_time,
         "topic": topic,
+        "meeting_topic": topic,
     }, "ended")
 
 
@@ -251,7 +257,7 @@ def make_handler(secret: str, forward_url: str):
                 self._ok()
                 return
 
-            # Meeting ended → trigger mark_mc_completed if Day 2
+            # Meeting ended → POST meeting.ended for Day 1 / Day 2 MC topics
             if event == "meeting.ended":
                 _handle_meeting_ended(body, self._forward_url)
                 self._ok()
@@ -324,12 +330,13 @@ def main() -> None:
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
         f"Presence threshold : {_PRESENCE_SECONDS}s ({_PRESENCE_SECONDS // 60}m)\n"
+        f"Day 1 keywords     : {_DAY1_KEYWORDS}\n"
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
         f"Forward URL        : {forward}\n"
         "participant_joined → timer started\n"
         "participant_left   → timer cancelled + POST attendance.mark_no to Zoho\n"
         "timer fires        → POST attendance.mark_yes to Zoho\n"
-        "meeting.ended (D2) → POST meeting.ended to Zoho\n"
+        "meeting.ended (D1/D2) → POST meeting.ended to Zoho\n"
         "other events       → forwarded as-is to Zoho",
         flush=True,
     )
