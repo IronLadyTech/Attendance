@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Zoom webhook bridge with 5-minute presence timer and Day 2 completion handler.
+Zoom webhook bridge with 30-minute presence timer and Day 2 completion handler.
 
 All outgoing calls go to the single ZOHO_WEBHOOK_FORWARD_URL.
 The Zoho Flow branches on the "event" field:
@@ -10,7 +10,7 @@ The Zoho Flow branches on the "event" field:
   - "meeting.ended"             → set_blank + mark_mc_completed (Day 1 / Day 2)
 
 How it works:
-  - meeting.participant_joined  → start a 5-min timer for that person
+  - meeting.participant_joined  → start a 30-min timer for that person
   - meeting.participant_left    → cancel timer + POST {"event":"attendance.mark_no", ...} to Zoho
   - timer fires (still present) → POST {"event":"attendance.mark_yes", ...} to Zoho
   - meeting.ended (Day 1 or Day 2 topic) → POST {"event":"meeting.ended", ...} to Zoho
@@ -22,7 +22,7 @@ Environment variables required:
   ZOHO_WEBHOOK_FORWARD_URL   — single Zoho Flow webhook URL (handles all events)
 
 Optional:
-  PRESENCE_SECONDS           — seconds before marking Yes (default: 300 = 5 min)
+  PRESENCE_SECONDS           — seconds before marking Yes (default: 1800 = 30 min)
   PORT                       — listen port (default: 8080, Render sets this)
 """
 from __future__ import annotations
@@ -43,7 +43,7 @@ import requests
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Seconds a participant must be present before attendance is marked Yes
-_PRESENCE_SECONDS = int(os.environ.get("PRESENCE_SECONDS", "300"))
+_PRESENCE_SECONDS = int(os.environ.get("PRESENCE_SECONDS", "1800"))
 
 # Topic keywords that identify MC sessions (case-insensitive)
 _DAY1_KEYWORDS = ["bhag", "breakthrough actions"]
