@@ -20,9 +20,9 @@ How it works:
 Multi-account routing:
   The MC Zoom account's app posts to "/" (unchanged). A second Zoom account
   (100BM weekly sessions) posts to "/100bm" — same handlers, but validated
-  with its own secret token and every outgoing payload gets "program":"100BM"
-  so the Zoho Flow can branch. meeting.ended on /100bm is always forwarded
-  (no topic keyword filter).
+  with its own secret token, filtered to topics matching _100BM_KEYWORDS,
+  and every outgoing payload gets "program":"100BM" plus "session_date"
+  (IST, YYYY-MM-DD) so the Zoho Flow can match records by invite date.
 
 Environment variables required:
   ZOOM_WEBHOOK_SECRET_TOKEN  — Zoom app Secret Token (webhooks section)
@@ -44,6 +44,7 @@ import os
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
@@ -58,6 +59,26 @@ _PRESENCE_SECONDS = int(os.environ.get("PRESENCE_SECONDS", "1800"))
 _DAY1_KEYWORDS = ["bhag", "breakthrough actions"]
 _DAY2_KEYWORDS = ["art of war", "shameless pitching"]
 _MC_MEETING_KEYWORDS = _DAY1_KEYWORDS + _DAY2_KEYWORDS
+
+# Topic keywords that identify 100BM Wednesday sessions on the /100bm route
+# (e.g. "Orientation Session- Fast track your Leadership Growth")
+_100BM_KEYWORDS = ["orientation session", "fast track your leadership growth"]
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _is_100bm_topic(topic: str) -> bool:
+    topic_l = topic.lower()
+    return any(kw in topic_l for kw in _100BM_KEYWORDS)
+
+
+def _session_date_ist(iso_ts: str) -> str:
+    """Zoom timestamps are UTC; Zoho invite dates are IST — convert before matching."""
+    try:
+        dt = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        dt = datetime.now(timezone.utc)
+    return dt.astimezone(_IST).strftime("%Y-%m-%d")
 
 # Thread-safe registry: timer_key -> threading.Timer
 _timers: dict[str, threading.Timer] = {}
@@ -109,6 +130,7 @@ def _mark_attendance(forward_url: str, meeting_id: str, email: str, name: str, t
         "meeting_topic": topic,
         "join_time": join_time,
         "program": program,
+        "session_date": _session_date_ist(join_time),
     }, "timer")
 
 
@@ -123,6 +145,10 @@ def _handle_participant_joined(body: dict, forward_url: str, program: str) -> No
 
     if not email or not meeting_id:
         sys.stderr.write("[join] Missing email or meeting_id — skipping timer\n")
+        return
+
+    if program == "100BM" and not _is_100bm_topic(topic):
+        sys.stderr.write(f"[join] Not a 100BM session (topic={topic!r}) — skipping timer\n")
         return
 
     key = _timer_key(meeting_id, email)
@@ -153,8 +179,13 @@ def _handle_participant_left(body: dict, forward_url: str, program: str) -> None
     email = participant.get("email", "").strip()
     name = participant.get("user_name", "").strip()
     topic = obj.get("topic", "")
+    leave_time = participant.get("leave_time", "")
 
     if not email or not meeting_id:
+        return
+
+    if program == "100BM" and not _is_100bm_topic(topic):
+        sys.stderr.write(f"[left] Not a 100BM session (topic={topic!r}) — skipping\n")
         return
 
     key = _timer_key(meeting_id, email)
@@ -175,6 +206,7 @@ def _handle_participant_left(body: dict, forward_url: str, program: str) -> None
             "meeting_topic": topic,
             "duration_seconds": duration_seconds,
             "program": program,
+            "session_date": _session_date_ist(leave_time),
         }, "left-early")
     elif duration_seconds > 0:
         sys.stderr.write(f"[left] Already marked Yes — {email} total {duration_seconds}s → updating duration\n")
@@ -186,6 +218,7 @@ def _handle_participant_left(body: dict, forward_url: str, program: str) -> None
             "meeting_topic": topic,
             "duration_seconds": duration_seconds,
             "program": program,
+            "session_date": _session_date_ist(leave_time),
         }, "left-update-duration")
     else:
         sys.stderr.write(f"[left] No active timer for {email} (already marked or never joined)\n")
@@ -206,6 +239,9 @@ def _handle_meeting_ended(body: dict, forward_url: str, program: str) -> None:
         day_label = "Day 2" if any(kw in topic_l for kw in _DAY2_KEYWORDS) else "Day 1"
         sys.stderr.write(f"[ended] {day_label} ended — posting meeting.ended (meeting={meeting_id})\n")
     else:
+        if not _is_100bm_topic(topic):
+            sys.stderr.write(f"[ended] Not a 100BM session (topic={topic!r}) — skipping\n")
+            return
         sys.stderr.write(f"[ended] 100BM session ended — posting meeting.ended (meeting={meeting_id})\n")
 
     _post_to_zoho(forward_url, {
@@ -215,6 +251,7 @@ def _handle_meeting_ended(body: dict, forward_url: str, program: str) -> None:
         "topic": topic,
         "meeting_topic": topic,
         "program": program,
+        "session_date": _session_date_ist(start_time),
     }, "ended")
 
 
@@ -370,6 +407,7 @@ def main() -> None:
         f"Presence threshold : {_PRESENCE_SECONDS}s ({_PRESENCE_SECONDS // 60}m)\n"
         f"Day 1 keywords     : {_DAY1_KEYWORDS}\n"
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
+        f"100BM keywords     : {_100BM_KEYWORDS}\n"
         f"100BM route        : {route_100bm}\n"
         f"Forward URL        : {forward}\n"
         "participant_joined → timer started\n"
