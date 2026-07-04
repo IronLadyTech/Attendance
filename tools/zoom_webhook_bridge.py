@@ -31,6 +31,8 @@ Environment variables required:
 Optional:
   ZOOM_WEBHOOK_SECRET_TOKEN_100BM — Secret Token of the 100BM account's Zoom app;
                                enables the /100bm endpoint (404 when unset)
+  ZOHO_WEBHOOK_FORWARD_URL_100BM — separate Zoho Flow webhook for /100bm events
+                               (falls back to ZOHO_WEBHOOK_FORWARD_URL)
   PRESENCE_SECONDS           — seconds before marking Yes (default: 1800 = 30 min)
   PORT                       — listen port (default: 8080, Render sets this)
 """
@@ -260,23 +262,24 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
-def make_handler(secret: str, forward_url: str, secret_100bm: str = ""):
+def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_url_100bm: str = ""):
     class H(BaseHTTPRequestHandler):
         _secret = secret
         _secret_100bm = secret_100bm
         _forward_url = forward_url
+        _forward_url_100bm = forward_url_100bm or forward_url
 
         def log_message(self, fmt: str, *args) -> None:
             sys.stderr.write(fmt % args + "\n")
 
-        def _route(self) -> tuple[str, str] | None:
-            """Returns (secret, program) for this request path, or None for 404."""
+        def _route(self) -> tuple[str, str, str] | None:
+            """Returns (secret, program, forward_url) for this request path, or None for 404."""
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
             if path == "/100bm":
                 if not self._secret_100bm:
                     return None
-                return self._secret_100bm, "100BM"
-            return self._secret, ""
+                return self._secret_100bm, "100BM", self._forward_url_100bm
+            return self._secret, "", self._forward_url
 
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -289,7 +292,7 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = ""):
                 self.end_headers()
                 self.wfile.write(b'{"error":"/100bm disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_100BM"}')
                 return
-            route_secret, program = route
+            route_secret, program, route_forward = route
 
             try:
                 body = json.loads(raw.decode("utf-8"))
@@ -319,24 +322,24 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = ""):
 
             # Participant joined → start presence timer
             if event == "meeting.participant_joined":
-                _handle_participant_joined(body, self._forward_url, program)
+                _handle_participant_joined(body, route_forward, program)
                 self._ok()
                 return
 
             # Participant left → cancel timer + mark No
             if event == "meeting.participant_left":
-                _handle_participant_left(body, self._forward_url, program)
+                _handle_participant_left(body, route_forward, program)
                 self._ok()
                 return
 
-            # Meeting ended → MC topics on "/", every meeting on "/100bm"
+            # Meeting ended → MC topics on "/", 100BM topics on "/100bm"
             if event == "meeting.ended":
-                _handle_meeting_ended(body, self._forward_url, program)
+                _handle_meeting_ended(body, route_forward, program)
                 self._ok()
                 return
 
             # All other events → forward as-is to Zoho
-            self._forward(raw)
+            self._forward(raw, route_forward)
 
         def _ok(self) -> None:
             self.send_response(200)
@@ -344,10 +347,10 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = ""):
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
 
-        def _forward(self, raw: bytes) -> None:
+        def _forward(self, raw: bytes, forward_url: str) -> None:
             try:
                 r = requests.post(
-                    self._forward_url,
+                    forward_url,
                     data=raw,
                     headers={"Content-Type": "application/json"},
                     timeout=60,
@@ -385,6 +388,7 @@ def main() -> None:
     secret = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN", "").strip()
     secret_100bm = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_100BM", "").strip()
     forward = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL", "").strip()
+    forward_100bm = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL_100BM", "").strip()
 
     if not secret:
         print("ERROR: Set ZOOM_WEBHOOK_SECRET_TOKEN", file=sys.stderr)
@@ -399,9 +403,10 @@ def main() -> None:
     p.add_argument("--port", type=int, default=default_port)
     args = p.parse_args()
 
-    handler = make_handler(secret, forward, secret_100bm)
+    handler = make_handler(secret, forward, secret_100bm, forward_100bm)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     route_100bm = "/100bm enabled (program=100BM)" if secret_100bm else "/100bm disabled (set ZOOM_WEBHOOK_SECRET_TOKEN_100BM)"
+    forward_100bm_label = forward_100bm if forward_100bm else f"{forward} (fallback: same as MC)"
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
         f"Presence threshold : {_PRESENCE_SECONDS}s ({_PRESENCE_SECONDS // 60}m)\n"
@@ -409,6 +414,7 @@ def main() -> None:
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
         f"100BM keywords     : {_100BM_KEYWORDS}\n"
         f"100BM route        : {route_100bm}\n"
+        f"100BM forward URL  : {forward_100bm_label}\n"
         f"Forward URL        : {forward}\n"
         "participant_joined → timer started\n"
         "participant_left   → timer cancelled + POST attendance.mark_no to Zoho\n"
