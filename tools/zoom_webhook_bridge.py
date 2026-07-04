@@ -379,6 +379,7 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_
                 "active_timers": active,
                 "presence_seconds": _PRESENCE_SECONDS,
                 "route_100bm": bool(self._secret_100bm),
+                "forward_100bm_separate": self._forward_url_100bm != self._forward_url,
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
