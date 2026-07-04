@@ -365,6 +365,11 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
 
+        def do_HEAD(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+
         def do_GET(self) -> None:
             with _timers_lock:
                 active = len(_timers)
