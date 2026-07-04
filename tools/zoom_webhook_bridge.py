@@ -3,7 +3,7 @@
 Zoom webhook bridge with 30-minute presence timer and Day 2 completion handler.
 
 All outgoing calls go to the single ZOHO_WEBHOOK_FORWARD_URL.
-The Zoho Flow branches on the "event" field:
+The Zoho Flow branches on the "event" field (and "program" for 100BM):
   - "attendance.mark_yes"       → call mark_attendance_yes
   - "attendance.mark_no"        → call mark_attendance_no
   - "attendance.update_duration"→ optional (no Flow branch required)
@@ -17,11 +17,20 @@ How it works:
   - endpoint.url_validation     → answer Zoom's HMAC challenge
   - all other Zoom events       → forward as-is to Zoho
 
+Multi-account routing:
+  The MC Zoom account's app posts to "/" (unchanged). A second Zoom account
+  (100BM weekly sessions) posts to "/100bm" — same handlers, but validated
+  with its own secret token and every outgoing payload gets "program":"100BM"
+  so the Zoho Flow can branch. meeting.ended on /100bm is always forwarded
+  (no topic keyword filter).
+
 Environment variables required:
   ZOOM_WEBHOOK_SECRET_TOKEN  — Zoom app Secret Token (webhooks section)
   ZOHO_WEBHOOK_FORWARD_URL   — single Zoho Flow webhook URL (handles all events)
 
 Optional:
+  ZOOM_WEBHOOK_SECRET_TOKEN_100BM — Secret Token of the 100BM account's Zoom app;
+                               enables the /100bm endpoint (404 when unset)
   PRESENCE_SECONDS           — seconds before marking Yes (default: 1800 = 30 min)
   PORT                       — listen port (default: 8080, Render sets this)
 """
@@ -85,7 +94,7 @@ def _post_to_zoho(forward_url: str, payload: dict, label: str) -> None:
         sys.stderr.write(f"[{label}] ERROR posting to Zoho: {e}\n")
 
 
-def _mark_attendance(forward_url: str, meeting_id: str, email: str, name: str, topic: str, join_time: str) -> None:
+def _mark_attendance(forward_url: str, meeting_id: str, email: str, name: str, topic: str, join_time: str, program: str) -> None:
     """Called by timer thread when participant has been present for PRESENCE_SECONDS."""
     key = _timer_key(meeting_id, email)
     with _timers_lock:
@@ -99,10 +108,11 @@ def _mark_attendance(forward_url: str, meeting_id: str, email: str, name: str, t
         "participant_name": name,
         "meeting_topic": topic,
         "join_time": join_time,
+        "program": program,
     }, "timer")
 
 
-def _handle_participant_joined(body: dict, forward_url: str) -> None:
+def _handle_participant_joined(body: dict, forward_url: str, program: str) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
@@ -127,7 +137,7 @@ def _handle_participant_joined(body: dict, forward_url: str) -> None:
         t = threading.Timer(
             _PRESENCE_SECONDS,
             _mark_attendance,
-            args=[forward_url, meeting_id, email, name, topic, join_time],
+            args=[forward_url, meeting_id, email, name, topic, join_time, program],
         )
         t.daemon = True
         t.start()
@@ -136,7 +146,7 @@ def _handle_participant_joined(body: dict, forward_url: str) -> None:
     sys.stderr.write(f"[join] Timer started — {email} must stay {_PRESENCE_SECONDS}s (meeting={meeting_id})\n")
 
 
-def _handle_participant_left(body: dict, forward_url: str) -> None:
+def _handle_participant_left(body: dict, forward_url: str, program: str) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
@@ -164,6 +174,7 @@ def _handle_participant_left(body: dict, forward_url: str) -> None:
             "participant_name": name,
             "meeting_topic": topic,
             "duration_seconds": duration_seconds,
+            "program": program,
         }, "left-early")
     elif duration_seconds > 0:
         sys.stderr.write(f"[left] Already marked Yes — {email} total {duration_seconds}s → updating duration\n")
@@ -174,31 +185,36 @@ def _handle_participant_left(body: dict, forward_url: str) -> None:
             "participant_name": name,
             "meeting_topic": topic,
             "duration_seconds": duration_seconds,
+            "program": program,
         }, "left-update-duration")
     else:
         sys.stderr.write(f"[left] No active timer for {email} (already marked or never joined)\n")
 
 
-def _handle_meeting_ended(body: dict, forward_url: str) -> None:
+def _handle_meeting_ended(body: dict, forward_url: str, program: str) -> None:
     obj = body.get("payload", {}).get("object", {})
     topic = obj.get("topic", "")
     start_time = obj.get("start_time", "")
     meeting_id = str(obj.get("id", ""))
 
     topic_l = topic.lower()
-    is_mc = any(kw in topic_l for kw in _MC_MEETING_KEYWORDS)
-    if not is_mc:
-        sys.stderr.write(f"[ended] Not an MC meeting (topic={topic!r}) — skipping\n")
-        return
+    if program != "100BM":
+        is_mc = any(kw in topic_l for kw in _MC_MEETING_KEYWORDS)
+        if not is_mc:
+            sys.stderr.write(f"[ended] Not an MC meeting (topic={topic!r}) — skipping\n")
+            return
+        day_label = "Day 2" if any(kw in topic_l for kw in _DAY2_KEYWORDS) else "Day 1"
+        sys.stderr.write(f"[ended] {day_label} ended — posting meeting.ended (meeting={meeting_id})\n")
+    else:
+        sys.stderr.write(f"[ended] 100BM session ended — posting meeting.ended (meeting={meeting_id})\n")
 
-    day_label = "Day 2" if any(kw in topic_l for kw in _DAY2_KEYWORDS) else "Day 1"
-    sys.stderr.write(f"[ended] {day_label} ended — posting meeting.ended (meeting={meeting_id})\n")
     _post_to_zoho(forward_url, {
         "event": "meeting.ended",
         "meeting_id": meeting_id,
         "start_time": start_time,
         "topic": topic,
         "meeting_topic": topic,
+        "program": program,
     }, "ended")
 
 
@@ -207,17 +223,36 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
-def make_handler(secret: str, forward_url: str):
+def make_handler(secret: str, forward_url: str, secret_100bm: str = ""):
     class H(BaseHTTPRequestHandler):
         _secret = secret
+        _secret_100bm = secret_100bm
         _forward_url = forward_url
 
         def log_message(self, fmt: str, *args) -> None:
             sys.stderr.write(fmt % args + "\n")
 
+        def _route(self) -> tuple[str, str] | None:
+            """Returns (secret, program) for this request path, or None for 404."""
+            path = self.path.split("?", 1)[0].rstrip("/") or "/"
+            if path == "/100bm":
+                if not self._secret_100bm:
+                    return None
+                return self._secret_100bm, "100BM"
+            return self._secret, ""
+
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(length) if length else b""
+
+            route = self._route()
+            if route is None:
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"/100bm disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_100BM"}')
+                return
+            route_secret, program = route
 
             try:
                 body = json.loads(raw.decode("utf-8"))
@@ -231,7 +266,7 @@ def make_handler(secret: str, forward_url: str):
             # Zoom URL validation challenge
             if event == "endpoint.url_validation":
                 try:
-                    payload = _validation_response(body, self._secret)
+                    payload = _validation_response(body, route_secret)
                 except ValueError as e:
                     self.send_response(500)
                     self.send_header("Content-Type", "application/json")
@@ -247,19 +282,19 @@ def make_handler(secret: str, forward_url: str):
 
             # Participant joined → start presence timer
             if event == "meeting.participant_joined":
-                _handle_participant_joined(body, self._forward_url)
+                _handle_participant_joined(body, self._forward_url, program)
                 self._ok()
                 return
 
             # Participant left → cancel timer + mark No
             if event == "meeting.participant_left":
-                _handle_participant_left(body, self._forward_url)
+                _handle_participant_left(body, self._forward_url, program)
                 self._ok()
                 return
 
-            # Meeting ended → POST meeting.ended for Day 1 / Day 2 MC topics
+            # Meeting ended → MC topics on "/", every meeting on "/100bm"
             if event == "meeting.ended":
-                _handle_meeting_ended(body, self._forward_url)
+                _handle_meeting_ended(body, self._forward_url, program)
                 self._ok()
                 return
 
@@ -298,6 +333,7 @@ def make_handler(secret: str, forward_url: str):
                 "service": "zoom_webhook_bridge",
                 "active_timers": active,
                 "presence_seconds": _PRESENCE_SECONDS,
+                "route_100bm": bool(self._secret_100bm),
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -310,6 +346,7 @@ def make_handler(secret: str, forward_url: str):
 def main() -> None:
     _load_dotenv()
     secret = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN", "").strip()
+    secret_100bm = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_100BM", "").strip()
     forward = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL", "").strip()
 
     if not secret:
@@ -325,13 +362,15 @@ def main() -> None:
     p.add_argument("--port", type=int, default=default_port)
     args = p.parse_args()
 
-    handler = make_handler(secret, forward)
+    handler = make_handler(secret, forward, secret_100bm)
     server = ThreadingHTTPServer((args.host, args.port), handler)
+    route_100bm = "/100bm enabled (program=100BM)" if secret_100bm else "/100bm disabled (set ZOOM_WEBHOOK_SECRET_TOKEN_100BM)"
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
         f"Presence threshold : {_PRESENCE_SECONDS}s ({_PRESENCE_SECONDS // 60}m)\n"
         f"Day 1 keywords     : {_DAY1_KEYWORDS}\n"
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
+        f"100BM route        : {route_100bm}\n"
         f"Forward URL        : {forward}\n"
         "participant_joined → timer started\n"
         "participant_left   → timer cancelled + POST attendance.mark_no to Zoho\n"
