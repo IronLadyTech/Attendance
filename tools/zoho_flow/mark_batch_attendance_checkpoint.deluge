@@ -1,0 +1,201 @@
+// Zoho Flow custom function — replaces set_blank_automation_not_attended for MC checkpoint model
+// Signature: void mark_batch_attendance_checkpoint(string start_time, string meeting_topic, string batch_date, string check_type)
+//   check_type = "first"  → T+15: blank → No
+//   check_type = "final"  → T+30: blank → Absent (never joined)
+// Connection: zoho_flow_to_zoho_crm
+//
+// Flow mapping (attendance.first_check branch):
+//   start_time    = ${webhookTrigger.payload.start_time}
+//   meeting_topic = ${webhookTrigger.payload.meeting_topic}
+//   batch_date    = ${webhookTrigger.payload.batch_date}
+//   check_type    = first
+//
+// Flow mapping (attendance.final_check branch):
+//   check_type    = final
+
+void mark_batch_attendance_checkpoint(string start_time, string meeting_topic, string batch_date, string check_type)
+{
+sessionDay = "";
+if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
+{
+	topicL = meeting_topic.toLowerCase();
+	if(topicL.contains("bhag") || topicL.contains("breakthrough actions"))
+	{
+		sessionDay = "Day 1";
+	}
+	else if(topicL.contains("art of war") || topicL.contains("shameless pitching"))
+	{
+		sessionDay = "Day 2";
+	}
+}
+if(sessionDay == "")
+{
+	info "checkpoint: unknown topic=" + meeting_topic;
+	return;
+}
+if(check_type == null || check_type.trim() == "")
+{
+	info "checkpoint: check_type missing";
+	return;
+}
+check_type = check_type.trim().toLowerCase();
+if(check_type != "first" && check_type != "final")
+{
+	info "checkpoint: invalid check_type=" + check_type;
+	return;
+}
+batch_start_date = batch_date;
+if(batch_start_date == null || batch_start_date.trim() == "" || batch_start_date == "null")
+{
+	if(start_time == null || start_time.trim() == "" || start_time == "null")
+	{
+		info "checkpoint: batch_date and start_time missing";
+		return;
+	}
+	meetingDate = start_time.substring(0,10);
+	meetingDt = meetingDate.toTime("yyyy-MM-dd");
+	if(sessionDay == "Day 1")
+	{
+		batch_start_date = meetingDate;
+	}
+	else
+	{
+		batch_start_date = (meetingDt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
+	}
+}
+batch_ddMMyyyy = batch_start_date.subString(8,10) + "-" + batch_start_date.subString(5,7) + "-" + batch_start_date.subString(0,4);
+info "checkpoint: type=" + check_type + " session=" + sessionDay + " batch=" + batch_start_date;
+// Payment_Status (UI: MC Payment Status) = Completed — NO Lead_Status filter
+searchCriteria = "(Payment_Status:equals:Completed)";
+allLeads = List();
+pageNums = {1,2,3,4,5,6,7,8,9,10};
+for each pageNum in pageNums
+{
+	pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
+	if(pageLeads != null && pageLeads.size() > 0)
+	{
+		allLeads.addAll(pageLeads);
+	}
+	else
+	{
+		break;
+	}
+}
+info "Total CRM leads fetched: " + allLeads.size();
+updateList = List();
+skippedCount = 0;
+matchedCount = 0;
+for each lead in allLeads
+{
+	leadDate = lead.get("MC_Start_Date_Time");
+	if(leadDate != null)
+	{
+		dateYMD = leadDate.toString("yyyy-MM-dd");
+		dateDMY = leadDate.toString("dd-MM-yyyy");
+		rawDate = leadDate.toString();
+		dateMatch = false;
+		if(dateYMD == batch_start_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_start_date) || rawDate.contains(batch_ddMMyyyy))
+		{
+			dateMatch = true;
+		}
+		if(dateMatch)
+		{
+			matchedCount = matchedCount + 1;
+			leadId = lead.get("id");
+			day1 = lead.get("Day_1_Attendance");
+			day2 = lead.get("Day_2_Attendance");
+			recMap = Map();
+			recMap.put("id",leadId);
+			needsUpdate = false;
+			day1Blank = day1 == null || day1 == "-None-" || day1.toString().trim() == "" || day1.toString().trim() == "null";
+			day2Blank = day2 == null || day2 == "-None-" || day2.toString().trim() == "" || day2.toString().trim() == "null";
+			if(check_type == "first")
+			{
+				if(sessionDay == "Day 1")
+				{
+					if(day1Blank)
+					{
+						recMap.put("Day_1_Attendance","No");
+						needsUpdate = true;
+					}
+				}
+				else
+				{
+					if(day1Blank)
+					{
+						recMap.put("Day_1_Attendance","No");
+						needsUpdate = true;
+					}
+					if(day2Blank)
+					{
+						recMap.put("Day_2_Attendance","No");
+						needsUpdate = true;
+					}
+				}
+			}
+			else
+			{
+				// final: only never-joined (still blank) → Absent
+				if(sessionDay == "Day 1")
+				{
+					if(day1Blank)
+					{
+						recMap.put("Day_1_Attendance","Absent");
+						needsUpdate = true;
+					}
+				}
+				else
+				{
+					if(day1Blank)
+					{
+						recMap.put("Day_1_Attendance","Absent");
+						needsUpdate = true;
+					}
+					if(day2Blank)
+					{
+						recMap.put("Day_2_Attendance","Absent");
+						needsUpdate = true;
+					}
+				}
+			}
+			if(needsUpdate)
+			{
+				updateList.add(recMap);
+			}
+			else
+			{
+				skippedCount = skippedCount + 1;
+			}
+		}
+	}
+}
+updatedCount = 0;
+chunk1 = List();
+chunk2 = List();
+chunkIdx = 0;
+for each recMap in updateList
+{
+	if(chunkIdx < 100)
+	{
+		chunk1.add(recMap);
+	}
+	else
+	{
+		chunk2.add(recMap);
+	}
+	chunkIdx = chunkIdx + 1;
+}
+if(chunk1.size() > 0)
+{
+	bulkResp1 = zoho.crm.bulkUpdate("Leads",chunk1);
+	info "bulkUpdate chunk1: " + bulkResp1.toString();
+	updatedCount = updatedCount + chunk1.size();
+}
+if(chunk2.size() > 0)
+{
+	bulkResp2 = zoho.crm.bulkUpdate("Leads",chunk2);
+	info "bulkUpdate chunk2: " + bulkResp2.toString();
+	updatedCount = updatedCount + chunk2.size();
+}
+info "checkpoint: type=" + check_type + " matched=" + matchedCount + " updated=" + updatedCount + " skipped=" + skippedCount;
+}

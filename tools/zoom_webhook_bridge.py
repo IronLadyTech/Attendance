@@ -1,40 +1,25 @@
 #!/usr/bin/env python3
 """
-Zoom webhook bridge with 30-minute presence timer and Day 2 completion handler.
+Zoom webhook bridge for Iron Lady MC (checkpoint) and 100BM (timer) attendance.
 
-All outgoing calls go to the single ZOHO_WEBHOOK_FORWARD_URL.
-The Zoho Flow branches on the "event" field (and "program" for 100BM):
-  - "attendance.mark_yes"       → call mark_attendance_yes
-  - "attendance.mark_no"        → call mark_attendance_no
-  - "attendance.update_duration"→ optional (no Flow branch required)
-  - "meeting.ended"             → set_blank + mark_mc_completed (Day 1 / Day 2)
+MC route (POST /):
+  - meeting.started (MC topic) → schedule T+15 and T+30 checkpoint sweeps
+  - meeting.participant_joined / left → maintain in-meeting roster (no per-person timer)
+  - T+15 → mark_yes for everyone in roster + attendance.first_check to Zoho
+  - T+30 → mark_yes for everyone in roster + attendance.final_check to Zoho
+  - meeting.ended (MC topic) → meeting.ended to Zoho (MC Completed only; no attendance)
 
-How it works:
-  - meeting.participant_joined  → start a 30-min timer for that person
-  - meeting.participant_left    → cancel timer + POST {"event":"attendance.mark_no", ...} to Zoho
-  - timer fires (still present) → POST {"event":"attendance.mark_yes", ...} to Zoho
-  - meeting.ended (Day 1 or Day 2 topic) → POST {"event":"meeting.ended", ...} to Zoho
-  - endpoint.url_validation     → answer Zoom's HMAC challenge
-  - all other Zoom events       → forward as-is to Zoho
-
-Multi-account routing:
-  The MC Zoom account's app posts to "/" (unchanged). A second Zoom account
-  (100BM weekly sessions) posts to "/100bm" — same handlers, but validated
-  with its own secret token, filtered to topics matching _100BM_KEYWORDS,
-  and every outgoing payload gets "program":"100BM" plus "session_date"
-  (IST, YYYY-MM-DD) so the Zoho Flow can match records by invite date.
+100BM route (POST /100bm) — unchanged timer model:
+  - 30-min presence timer, mark_no on early leave, mark_yes when timer fires
 
 Environment variables required:
-  ZOOM_WEBHOOK_SECRET_TOKEN  — Zoom app Secret Token (webhooks section)
-  ZOHO_WEBHOOK_FORWARD_URL   — single Zoho Flow webhook URL (handles all events)
+  ZOOM_WEBHOOK_SECRET_TOKEN, ZOHO_WEBHOOK_FORWARD_URL
 
 Optional:
-  ZOOM_WEBHOOK_SECRET_TOKEN_100BM — Secret Token of the 100BM account's Zoom app;
-                               enables the /100bm endpoint (404 when unset)
-  ZOHO_WEBHOOK_FORWARD_URL_100BM — separate Zoho Flow webhook for /100bm events
-                               (falls back to ZOHO_WEBHOOK_FORWARD_URL)
-  PRESENCE_SECONDS           — seconds before marking Yes (default: 1800 = 30 min)
-  PORT                       — listen port (default: 8080, Render sets this)
+  ZOOM_WEBHOOK_SECRET_TOKEN_100BM, ZOHO_WEBHOOK_FORWARD_URL_100BM
+  MC_CHECKPOINT_1_SECONDS (default 900 = 15 min)
+  MC_CHECKPOINT_2_SECONDS (default 1800 = 30 min)
+  PRESENCE_SECONDS (default 1800 = 30 min, 100BM route only)
 """
 from __future__ import annotations
 
@@ -54,39 +39,29 @@ import requests
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Seconds a participant must be present before attendance is marked Yes
+# 100BM timer threshold (MC route does not use this)
 _PRESENCE_SECONDS = int(os.environ.get("PRESENCE_SECONDS", "1800"))
 
-# Topic keywords that identify MC sessions (case-insensitive)
+# MC checkpoint delays from actual Zoom meeting start
+_MC_CHECKPOINT_1 = int(os.environ.get("MC_CHECKPOINT_1_SECONDS", "900"))   # T+15
+_MC_CHECKPOINT_2 = int(os.environ.get("MC_CHECKPOINT_2_SECONDS", "1800"))  # T+30
+
 _DAY1_KEYWORDS = ["bhag", "breakthrough actions"]
 _DAY2_KEYWORDS = ["art of war", "shameless pitching"]
 _MC_MEETING_KEYWORDS = _DAY1_KEYWORDS + _DAY2_KEYWORDS
 
-# Topic keywords that identify 100BM Wednesday sessions on the /100bm route
-# (e.g. "Orientation Session- Fast track your Leadership Growth")
 _100BM_KEYWORDS = ["orientation session", "fast track your leadership growth"]
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
-
-def _is_100bm_topic(topic: str) -> bool:
-    topic_l = topic.lower()
-    return any(kw in topic_l for kw in _100BM_KEYWORDS)
-
-
-def _session_date_ist(iso_ts: str) -> str:
-    """Zoom timestamps are UTC; Zoho invite dates are IST — convert before matching."""
-    try:
-        dt = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        dt = datetime.now(timezone.utc)
-    return dt.astimezone(_IST).strftime("%Y-%m-%d")
-
-# Thread-safe registry: timer_key -> threading.Timer
+# 100BM per-person timers
 _timers: dict[str, threading.Timer] = {}
-# Tracks wall-clock join time so we can calculate duration on leave
 _join_timestamps: dict[str, float] = {}
 _timers_lock = threading.Lock()
+
+# MC per-meeting roster + checkpoint timers
+_mc_meetings: dict[str, dict] = {}
+_mc_lock = threading.Lock()
 
 
 def _load_dotenv() -> None:
@@ -95,6 +70,54 @@ def _load_dotenv() -> None:
         load_dotenv(os.path.join(_REPO_ROOT, ".env"))
     except ImportError:
         pass
+
+
+def _is_mc_topic(topic: str) -> bool:
+    topic_l = topic.lower()
+    return any(kw in topic_l for kw in _MC_MEETING_KEYWORDS)
+
+
+def _is_100bm_topic(topic: str) -> bool:
+    topic_l = topic.lower()
+    return any(kw in topic_l for kw in _100BM_KEYWORDS)
+
+
+def _mc_session_day(topic: str) -> str:
+    topic_l = topic.lower()
+    if any(kw in topic_l for kw in _DAY2_KEYWORDS):
+        return "Day 2"
+    return "Day 1"
+
+
+def _parse_zoom_datetime(iso_ts: str) -> datetime:
+    if not iso_ts or iso_ts.strip() in ("", "null"):
+        return datetime.now(timezone.utc)
+    s = iso_ts.strip()
+    if s.endswith("Z"):
+        try:
+            return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    try:
+        parsed = datetime.fromisoformat(s)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        pass
+    return datetime.now(timezone.utc)
+
+
+def _session_date_ist(iso_ts: str) -> str:
+    return _parse_zoom_datetime(iso_ts).astimezone(_IST).strftime("%Y-%m-%d")
+
+
+def _batch_date(session_date: str, session_day: str) -> str:
+    """Day 1 → batch = session date. Day 2 → batch = session date minus 1 day."""
+    if session_day == "Day 1":
+        return session_date
+    dt = datetime.strptime(session_date, "%Y-%m-%d").date()
+    return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def _validation_response(body: dict, secret: str) -> bytes:
@@ -117,8 +140,265 @@ def _post_to_zoho(forward_url: str, payload: dict, label: str) -> None:
         sys.stderr.write(f"[{label}] ERROR posting to Zoho: {e}\n")
 
 
-def _mark_attendance(forward_url: str, meeting_id: str, email: str, name: str, topic: str, join_time: str, program: str) -> None:
-    """Called by timer thread when participant has been present for PRESENCE_SECONDS."""
+def _mc_roster_key(email: str, name: str) -> str:
+    if email:
+        return f"email:{email.lower().strip()}"
+    if name:
+        return f"name:{name.lower().strip()}"
+    return ""
+
+
+def _mc_base_payload(state: dict) -> dict:
+    return {
+        "meeting_id": state["meeting_id"],
+        "meeting_topic": state["topic"],
+        "topic": state["topic"],
+        "start_time": state["start_time"],
+        "session_date": state["session_date"],
+        "batch_date": state["batch_date"],
+        "session_day": state["session_day"],
+        "program": "MC",
+    }
+
+
+def _mc_mark_yes(forward_url: str, state: dict, email: str, name: str, join_time: str) -> None:
+    payload = _mc_base_payload(state)
+    payload.update({
+        "event": "attendance.mark_yes",
+        "participant_email": email,
+        "participant_name": name,
+        "join_time": join_time,
+    })
+    _post_to_zoho(forward_url, payload, "mc-yes")
+
+
+def _mc_lookup_participant(forward_url: str, state: dict, email: str, name: str, join_time: str) -> None:
+    """Joined but left before checkpoint — verify CRM match or log to unmatched sheet."""
+    payload = _mc_base_payload(state)
+    payload.update({
+        "event": "attendance.lookup",
+        "participant_email": email,
+        "participant_name": name,
+        "join_time": join_time,
+    })
+    _post_to_zoho(forward_url, payload, "mc-lookup")
+
+
+def _mc_sweep(meeting_id: str, sweep: int) -> None:
+    with _mc_lock:
+        state = _mc_meetings.get(meeting_id)
+        if not state:
+            sys.stderr.write(f"[sweep{sweep}] No state for meeting={meeting_id}\n")
+            return
+        roster = dict(state["roster"])
+        ever_joined = dict(state.get("ever_joined", {}))
+        forward_url = state["forward_url"]
+
+    sys.stderr.write(
+        f"[sweep{sweep}] meeting={meeting_id} roster={len(roster)} "
+        f"ever_joined={len(ever_joined)} topic={state['topic']!r} batch={state['batch_date']}\n"
+    )
+
+    # Present at checkpoint → mark Yes (CRM) or unmatched sheet if no lead
+    for info in roster.values():
+        email = info.get("email", "")
+        name = info.get("name", "")
+        if not email and not name:
+            continue
+        _mc_mark_yes(forward_url, state, email, name, info.get("join_time", ""))
+
+    # T+15 only: joined earlier but left before check → verify match or sheet
+    if sweep == 1:
+        roster_keys = set(roster.keys())
+        for rkey, info in ever_joined.items():
+            if rkey in roster_keys:
+                continue
+            email = info.get("email", "")
+            name = info.get("name", "")
+            if not email and not name:
+                continue
+            _mc_lookup_participant(forward_url, state, email, name, info.get("join_time", ""))
+
+    event = "attendance.first_check" if sweep == 1 else "attendance.final_check"
+    payload = _mc_base_payload(state)
+    payload["event"] = event
+    _post_to_zoho(forward_url, payload, f"mc-sweep{sweep}")
+
+
+def _mc_cancel_timers(state: dict) -> None:
+    for t in state.get("timers", []):
+        t.cancel()
+
+
+def _mc_schedule_checkpoints(meeting_id: str, state: dict) -> None:
+    _mc_cancel_timers(state)
+    t1 = threading.Timer(_MC_CHECKPOINT_1, _mc_sweep, args=[meeting_id, 1])
+    t2 = threading.Timer(_MC_CHECKPOINT_2, _mc_sweep, args=[meeting_id, 2])
+    for t in (t1, t2):
+        t.daemon = True
+        t.start()
+    state["timers"] = [t1, t2]
+    sys.stderr.write(
+        f"[started] Checkpoints scheduled: T+{_MC_CHECKPOINT_1}s and T+{_MC_CHECKPOINT_2}s "
+        f"meeting={meeting_id}\n"
+    )
+
+
+def _handle_meeting_started(body: dict, forward_url: str) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    topic = obj.get("topic", "")
+    if not _is_mc_topic(topic):
+        sys.stderr.write(f"[started] Not an MC topic (topic={topic!r}) — skipping\n")
+        return
+
+    meeting_id = str(obj.get("id", ""))
+    start_time = obj.get("start_time", "")
+    session_day = _mc_session_day(topic)
+    session_date = _session_date_ist(start_time)
+    batch = _batch_date(session_date, session_day)
+
+    with _mc_lock:
+        existing = _mc_meetings.get(meeting_id)
+        roster: dict = {}
+        ever_joined: dict = {}
+        if existing:
+            roster = dict(existing.get("roster", {}))
+            ever_joined = dict(existing.get("ever_joined", {}))
+            _mc_cancel_timers(existing)
+
+        state = {
+            "meeting_id": meeting_id,
+            "topic": topic,
+            "start_time": start_time,
+            "session_date": session_date,
+            "batch_date": batch,
+            "session_day": session_day,
+            "forward_url": forward_url,
+            "roster": roster,
+            "ever_joined": ever_joined,
+            "timers": [],
+        }
+        _mc_schedule_checkpoints(meeting_id, state)
+        _mc_meetings[meeting_id] = state
+
+    sys.stderr.write(
+        f"[started] MC {session_day} meeting={meeting_id} "
+        f"session={session_date} batch={batch} roster={len(roster)}\n"
+    )
+
+
+def _handle_mc_participant_joined(body: dict, forward_url: str) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    participant = obj.get("participant", {})
+    meeting_id = str(obj.get("id", ""))
+    email = participant.get("email", "").strip()
+    name = participant.get("user_name", "").strip()
+    join_time = participant.get("join_time", "")
+    topic = obj.get("topic", "")
+
+    if not _is_mc_topic(topic):
+        sys.stderr.write(f"[join/mc] Not MC topic (topic={topic!r}) — skipping\n")
+        return
+
+    rkey = _mc_roster_key(email, name)
+    if not rkey:
+        sys.stderr.write("[join/mc] Missing email and name — skipping roster\n")
+        return
+
+    with _mc_lock:
+        state = _mc_meetings.get(meeting_id)
+        if state is None:
+            session_day = _mc_session_day(topic)
+            session_date = _session_date_ist(join_time or obj.get("start_time", ""))
+            state = {
+                "meeting_id": meeting_id,
+                "topic": topic,
+                "start_time": obj.get("start_time", join_time),
+                "session_date": session_date,
+                "batch_date": _batch_date(session_date, session_day),
+                "session_day": session_day,
+                "forward_url": forward_url,
+                "roster": {},
+                "ever_joined": {},
+                "timers": [],
+            }
+            _mc_meetings[meeting_id] = state
+            sys.stderr.write(
+                f"[join/mc] Roster created before meeting.started meeting={meeting_id}\n"
+            )
+
+        pinfo = {
+            "email": email,
+            "name": name,
+            "join_time": join_time,
+        }
+        state["roster"][rkey] = pinfo
+        state.setdefault("ever_joined", {})[rkey] = pinfo
+
+    sys.stderr.write(f"[join/mc] Roster +1 {email or name} meeting={meeting_id}\n")
+
+
+def _handle_mc_participant_left(body: dict) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    participant = obj.get("participant", {})
+    meeting_id = str(obj.get("id", ""))
+    email = participant.get("email", "").strip()
+    name = participant.get("user_name", "").strip()
+    topic = obj.get("topic", "")
+
+    if not _is_mc_topic(topic):
+        return
+
+    rkey = _mc_roster_key(email, name)
+    if not rkey:
+        return
+
+    with _mc_lock:
+        state = _mc_meetings.get(meeting_id)
+        if state and rkey in state.get("roster", {}):
+            state["roster"].pop(rkey, None)
+            sys.stderr.write(
+                f"[left/mc] Roster -1 {email or name} meeting={meeting_id} "
+                "(no downgrade; checkpoint decides)\n"
+            )
+
+
+def _handle_meeting_ended(body: dict, forward_url: str, program: str) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    topic = obj.get("topic", "")
+    start_time = obj.get("start_time", "")
+    meeting_id = str(obj.get("id", ""))
+
+    if program == "100BM":
+        if not _is_100bm_topic(topic):
+            sys.stderr.write(f"[ended] Not a 100BM session (topic={topic!r}) — skipping\n")
+            return
+        sys.stderr.write(f"[ended] 100BM session ended — posting meeting.ended (meeting={meeting_id})\n")
+    else:
+        if not _is_mc_topic(topic):
+            sys.stderr.write(f"[ended] Not an MC meeting (topic={topic!r}) — skipping\n")
+            return
+        day_label = _mc_session_day(topic)
+        with _mc_lock:
+            state = _mc_meetings.pop(meeting_id, None)
+            if state:
+                _mc_cancel_timers(state)
+        sys.stderr.write(f"[ended] MC {day_label} ended — posting meeting.ended (meeting={meeting_id})\n")
+
+    _post_to_zoho(forward_url, {
+        "event": "meeting.ended",
+        "meeting_id": meeting_id,
+        "start_time": start_time,
+        "topic": topic,
+        "meeting_topic": topic,
+        "program": program or "MC",
+        "session_date": _session_date_ist(start_time),
+    }, "ended")
+
+
+# --- 100BM timer model (unchanged) ---
+
+def _mark_attendance(forward_url: str, meeting_id: str, email: str, name: str, topic: str, join_time: str) -> None:
     key = _timer_key(meeting_id, email)
     with _timers_lock:
         _timers.pop(key, None)
@@ -131,12 +411,12 @@ def _mark_attendance(forward_url: str, meeting_id: str, email: str, name: str, t
         "participant_name": name,
         "meeting_topic": topic,
         "join_time": join_time,
-        "program": program,
+        "program": "100BM",
         "session_date": _session_date_ist(join_time),
     }, "timer")
 
 
-def _handle_participant_joined(body: dict, forward_url: str, program: str) -> None:
+def _handle_100bm_participant_joined(body: dict, forward_url: str) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
@@ -146,11 +426,10 @@ def _handle_participant_joined(body: dict, forward_url: str, program: str) -> No
     topic = obj.get("topic", "")
 
     if not email or not meeting_id:
-        sys.stderr.write("[join] Missing email or meeting_id — skipping timer\n")
+        sys.stderr.write("[join/100bm] Missing email or meeting_id — skipping timer\n")
         return
-
-    if program == "100BM" and not _is_100bm_topic(topic):
-        sys.stderr.write(f"[join] Not a 100BM session (topic={topic!r}) — skipping timer\n")
+    if not _is_100bm_topic(topic):
+        sys.stderr.write(f"[join/100bm] Not a 100BM session (topic={topic!r}) — skipping timer\n")
         return
 
     key = _timer_key(meeting_id, email)
@@ -158,23 +437,21 @@ def _handle_participant_joined(body: dict, forward_url: str, program: str) -> No
         existing = _timers.pop(key, None)
         if existing:
             existing.cancel()
-            sys.stderr.write(f"[join] Cancelled previous timer for {email} (rejoin)\n")
-
+            sys.stderr.write(f"[join/100bm] Cancelled previous timer for {email} (rejoin)\n")
         _join_timestamps[key] = time.time()
-
         t = threading.Timer(
             _PRESENCE_SECONDS,
             _mark_attendance,
-            args=[forward_url, meeting_id, email, name, topic, join_time, program],
+            args=[forward_url, meeting_id, email, name, topic, join_time],
         )
         t.daemon = True
         t.start()
         _timers[key] = t
 
-    sys.stderr.write(f"[join] Timer started — {email} must stay {_PRESENCE_SECONDS}s (meeting={meeting_id})\n")
+    sys.stderr.write(f"[join/100bm] Timer started — {email} must stay {_PRESENCE_SECONDS}s\n")
 
 
-def _handle_participant_left(body: dict, forward_url: str, program: str) -> None:
+def _handle_100bm_participant_left(body: dict, forward_url: str) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
@@ -185,9 +462,7 @@ def _handle_participant_left(body: dict, forward_url: str, program: str) -> None
 
     if not email or not meeting_id:
         return
-
-    if program == "100BM" and not _is_100bm_topic(topic):
-        sys.stderr.write(f"[left] Not a 100BM session (topic={topic!r}) — skipping\n")
+    if not _is_100bm_topic(topic):
         return
 
     key = _timer_key(meeting_id, email)
@@ -199,7 +474,7 @@ def _handle_participant_left(body: dict, forward_url: str, program: str) -> None
 
     if timer:
         timer.cancel()
-        sys.stderr.write(f"[left] Timer cancelled — {email} left before {_PRESENCE_SECONDS}s ({duration_seconds}s) → marking No\n")
+        sys.stderr.write(f"[left/100bm] Timer cancelled — {email} left before {_PRESENCE_SECONDS}s → No\n")
         _post_to_zoho(forward_url, {
             "event": "attendance.mark_no",
             "meeting_id": meeting_id,
@@ -207,11 +482,10 @@ def _handle_participant_left(body: dict, forward_url: str, program: str) -> None
             "participant_name": name,
             "meeting_topic": topic,
             "duration_seconds": duration_seconds,
-            "program": program,
+            "program": "100BM",
             "session_date": _session_date_ist(leave_time),
         }, "left-early")
     elif duration_seconds > 0:
-        sys.stderr.write(f"[left] Already marked Yes — {email} total {duration_seconds}s → updating duration\n")
         _post_to_zoho(forward_url, {
             "event": "attendance.update_duration",
             "meeting_id": meeting_id,
@@ -219,46 +493,12 @@ def _handle_participant_left(body: dict, forward_url: str, program: str) -> None
             "participant_name": name,
             "meeting_topic": topic,
             "duration_seconds": duration_seconds,
-            "program": program,
+            "program": "100BM",
             "session_date": _session_date_ist(leave_time),
         }, "left-update-duration")
-    else:
-        sys.stderr.write(f"[left] No active timer for {email} (already marked or never joined)\n")
-
-
-def _handle_meeting_ended(body: dict, forward_url: str, program: str) -> None:
-    obj = body.get("payload", {}).get("object", {})
-    topic = obj.get("topic", "")
-    start_time = obj.get("start_time", "")
-    meeting_id = str(obj.get("id", ""))
-
-    topic_l = topic.lower()
-    if program != "100BM":
-        is_mc = any(kw in topic_l for kw in _MC_MEETING_KEYWORDS)
-        if not is_mc:
-            sys.stderr.write(f"[ended] Not an MC meeting (topic={topic!r}) — skipping\n")
-            return
-        day_label = "Day 2" if any(kw in topic_l for kw in _DAY2_KEYWORDS) else "Day 1"
-        sys.stderr.write(f"[ended] {day_label} ended — posting meeting.ended (meeting={meeting_id})\n")
-    else:
-        if not _is_100bm_topic(topic):
-            sys.stderr.write(f"[ended] Not a 100BM session (topic={topic!r}) — skipping\n")
-            return
-        sys.stderr.write(f"[ended] 100BM session ended — posting meeting.ended (meeting={meeting_id})\n")
-
-    _post_to_zoho(forward_url, {
-        "event": "meeting.ended",
-        "meeting_id": meeting_id,
-        "start_time": start_time,
-        "topic": topic,
-        "meeting_topic": topic,
-        "program": program,
-        "session_date": _session_date_ist(start_time),
-    }, "ended")
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-    """Handles each request in a separate thread so timers can fire concurrently."""
     daemon_threads = True
 
 
@@ -273,7 +513,6 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_
             sys.stderr.write(fmt % args + "\n")
 
         def _route(self) -> tuple[str, str, str] | None:
-            """Returns (secret, program, forward_url) for this request path, or None for 404."""
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
             if path == "/100bm":
                 if not self._secret_100bm:
@@ -303,7 +542,6 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_
 
             event = body.get("event", "")
 
-            # Zoom URL validation challenge
             if event == "endpoint.url_validation":
                 try:
                     payload = _validation_response(body, route_secret)
@@ -320,26 +558,28 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_
                 self.wfile.write(payload)
                 return
 
-            # Participant joined → start presence timer
-            if event == "meeting.participant_joined":
-                _handle_participant_joined(body, route_forward, program)
-                self._ok()
-                return
+            if program == "100BM":
+                if event == "meeting.participant_joined":
+                    _handle_100bm_participant_joined(body, route_forward)
+                elif event == "meeting.participant_left":
+                    _handle_100bm_participant_left(body, route_forward)
+                elif event == "meeting.ended":
+                    _handle_meeting_ended(body, route_forward, program)
+                else:
+                    self._forward(raw, route_forward)
+            else:
+                if event == "meeting.started":
+                    _handle_meeting_started(body, route_forward)
+                elif event == "meeting.participant_joined":
+                    _handle_mc_participant_joined(body, route_forward)
+                elif event == "meeting.participant_left":
+                    _handle_mc_participant_left(body)
+                elif event == "meeting.ended":
+                    _handle_meeting_ended(body, route_forward, program)
+                else:
+                    self._forward(raw, route_forward)
 
-            # Participant left → cancel timer + mark No
-            if event == "meeting.participant_left":
-                _handle_participant_left(body, route_forward, program)
-                self._ok()
-                return
-
-            # Meeting ended → MC topics on "/", 100BM topics on "/100bm"
-            if event == "meeting.ended":
-                _handle_meeting_ended(body, route_forward, program)
-                self._ok()
-                return
-
-            # All other events → forward as-is to Zoho
-            self._forward(raw, route_forward)
+            self._ok()
 
         def _ok(self) -> None:
             self.send_response(200)
@@ -372,14 +612,18 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_
 
         def do_GET(self) -> None:
             with _timers_lock:
-                active = len(_timers)
+                active_timers = len(_timers)
+            with _mc_lock:
+                active_mc = len(_mc_meetings)
             resp = json.dumps({
                 "ok": True,
                 "service": "zoom_webhook_bridge",
-                "active_timers": active,
-                "presence_seconds": _PRESENCE_SECONDS,
+                "mc_checkpoint_1_seconds": _MC_CHECKPOINT_1,
+                "mc_checkpoint_2_seconds": _MC_CHECKPOINT_2,
+                "presence_seconds_100bm": _PRESENCE_SECONDS,
+                "active_100bm_timers": active_timers,
+                "active_mc_meetings": active_mc,
                 "route_100bm": bool(self._secret_100bm),
-                "forward_100bm_separate": self._forward_url_100bm != self._forward_url,
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -411,22 +655,18 @@ def main() -> None:
 
     handler = make_handler(secret, forward, secret_100bm, forward_100bm)
     server = ThreadingHTTPServer((args.host, args.port), handler)
-    route_100bm = "/100bm enabled (program=100BM)" if secret_100bm else "/100bm disabled (set ZOOM_WEBHOOK_SECRET_TOKEN_100BM)"
-    forward_100bm_label = forward_100bm if forward_100bm else f"{forward} (fallback: same as MC)"
+    route_100bm = "/100bm enabled" if secret_100bm else "/100bm disabled"
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
-        f"Presence threshold : {_PRESENCE_SECONDS}s ({_PRESENCE_SECONDS // 60}m)\n"
+        f"MC checkpoints     : T+{_MC_CHECKPOINT_1}s (first), T+{_MC_CHECKPOINT_2}s (final)\n"
+        f"100BM timer        : {_PRESENCE_SECONDS}s ({_PRESENCE_SECONDS // 60}m)\n"
         f"Day 1 keywords     : {_DAY1_KEYWORDS}\n"
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
-        f"100BM keywords     : {_100BM_KEYWORDS}\n"
         f"100BM route        : {route_100bm}\n"
-        f"100BM forward URL  : {forward_100bm_label}\n"
         f"Forward URL        : {forward}\n"
-        "participant_joined → timer started\n"
-        "participant_left   → timer cancelled + POST attendance.mark_no to Zoho\n"
-        "timer fires        → POST attendance.mark_yes to Zoho\n"
-        "meeting.ended (D1/D2) → POST meeting.ended to Zoho\n"
-        "other events       → forwarded as-is to Zoho",
+        "MC /               : meeting.started → roster → T+15/T+30 sweeps\n"
+        "100BM /100bm       : 30-min timer model (unchanged)\n"
+        "meeting.ended      : MC Completed trigger only (no attendance at end)",
         flush=True,
     )
     server.serve_forever()

@@ -1,0 +1,17 @@
+void mark_mc_completed(string start_time)
+{
+if(start_time == null || start_time.trim() == "" || start_time == "null")
+{
+	info "start_time missing";
+	return;
+}
+jsonBody = "{\"arguments\":{\"start_time\":\"" + start_time + "\"}}";
+resp = invokeurl
+[
+	url :"https://www.zohoapis.in/crm/v7/functions/markmccompleted/actions/execute?auth_type=oauth"
+	type :POST
+	parameters:jsonBody
+	connection:"zoho_flow_to_zoho_crm"
+];
+info "Done: " + resp.toString();
+}
