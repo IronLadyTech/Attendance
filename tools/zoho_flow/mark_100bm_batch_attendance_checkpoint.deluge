@@ -1,0 +1,99 @@
+// Zoho Flow custom function — 100BM batch checkpoint audit (no CRM writes)
+// Signature: void mark_100bm_batch_attendance_checkpoint(string start_time, string meeting_topic, string session_date, string check_type)
+//
+// 100BM policy: only mark FT_attendance = Yes for attendees present at checkpoint.
+// No / Absent are NOT written — FT_attendance and FT_attended_date stay blank/untouched.
+// This function logs eligible-lead counts for monitoring only.
+// Connection: zoho_flow_to_zoho_crm
+//
+// Flow mapping (optional — audit log only):
+//   attendance.first_check  → check_type = first
+//   attendance.final_check  → check_type = final
+
+void mark_100bm_batch_attendance_checkpoint(string start_time, string meeting_topic, string session_date, string check_type)
+{
+if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
+{
+	topicL = meeting_topic.toLowerCase();
+	if(!topicL.contains("orientation session") && !topicL.contains("fast track your leadership growth"))
+	{
+		info "100BM checkpoint: unknown topic=" + meeting_topic;
+		return;
+	}
+}
+if(check_type == null || check_type.trim() == "")
+{
+	info "100BM checkpoint: check_type missing";
+	return;
+}
+check_type = check_type.trim().toLowerCase();
+if(check_type != "first" && check_type != "final")
+{
+	info "100BM checkpoint: invalid check_type=" + check_type;
+	return;
+}
+invite_date = session_date;
+if(invite_date == null || invite_date.trim() == "" || invite_date == "null")
+{
+	if(start_time == null || start_time.trim() == "" || start_time == "null")
+	{
+		info "100BM checkpoint: session_date and start_time missing";
+		return;
+	}
+	invite_date = start_time.substring(0,10);
+}
+invite_ddMMyyyy = invite_date.subString(8,10) + "-" + invite_date.subString(5,7) + "-" + invite_date.subString(0,4);
+info "100BM checkpoint audit: type=" + check_type + " invite_date=" + invite_date;
+allLeads = List();
+pageNums = {1,2,3,4,5,6,7,8,9,10};
+for each pageNum in pageNums
+{
+	pageLeads = zoho.crm.searchRecords("Leads","(FT_Invite_Date:equals:" + invite_date + ")",pageNum,200);
+	if(pageLeads != null && pageLeads.size() > 0)
+	{
+		allLeads.addAll(pageLeads);
+	}
+	else
+	{
+		break;
+	}
+}
+matchedCount = 0;
+yesCount = 0;
+blankCount = 0;
+otherCount = 0;
+for each lead in allLeads
+{
+	leadInvite = lead.get("FT_Invite_Date");
+	if(leadInvite != null)
+	{
+		dateYMD = leadInvite.toString("yyyy-MM-dd");
+		dateDMY = leadInvite.toString("dd-MM-yyyy");
+		rawDate = leadInvite.toString();
+		dateMatch = false;
+		if(dateYMD == invite_date || dateDMY == invite_ddMMyyyy || rawDate.contains(invite_date) || rawDate.contains(invite_ddMMyyyy))
+		{
+			dateMatch = true;
+		}
+		if(dateMatch)
+		{
+			matchedCount = matchedCount + 1;
+			ftAtt = lead.get("FT_attendance");
+			ftBlank = ftAtt == null || ftAtt == "-None-" || ftAtt.toString().trim() == "" || ftAtt.toString().trim() == "null";
+			if(ftBlank)
+			{
+				blankCount = blankCount + 1;
+			}
+			else if(ftAtt.toString() == "Yes")
+			{
+				yesCount = yesCount + 1;
+			}
+			else
+			{
+				otherCount = otherCount + 1;
+			}
+		}
+	}
+}
+info "100BM checkpoint audit: type=" + check_type + " eligible=" + matchedCount + " yes=" + yesCount + " blank=" + blankCount + " other=" + otherCount + " (no CRM updates — blank left untouched)";
+}

@@ -1,7 +1,7 @@
 // Zoho Flow custom function — replaces set_blank_automation_not_attended for MC checkpoint model
-// Signature: void mark_batch_attendance_checkpoint(string start_time, string meeting_topic, string batch_date, string check_type)
-//   check_type = "first"  → T+15: blank → No
-//   check_type = "final"  → T+30: blank → Absent (never joined)
+// Signature: void mark_batch_attendance_checkpoint(string start_time, string meeting_topic, string batch_date, string check_type, string ever_joined_emails)
+//   check_type = "first"  → T+15: blank → No (sales calls)
+//   check_type = "final"  → T+30: never joined Zoom → Absent (No/blank + not in ever_joined_emails)
 // Connection: zoho_flow_to_zoho_crm
 //
 // Flow mapping (attendance.first_check branch):
@@ -12,8 +12,9 @@
 //
 // Flow mapping (attendance.final_check branch):
 //   check_type    = final
+//   ever_joined_emails = ${webhookTrigger.payload.ever_joined_emails}
 
-void mark_batch_attendance_checkpoint(string start_time, string meeting_topic, string batch_date, string check_type)
+void mark_batch_attendance_checkpoint(string start_time, string meeting_topic, string batch_date, string check_type, string ever_joined_emails)
 {
 sessionDay = "";
 if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
@@ -135,10 +136,26 @@ for each lead in allLeads
 			}
 			else
 			{
-				// final: only never-joined (still blank) → Absent
+				// T+30: never joined Zoom → Absent. Dropouts (in ever_joined) stay No via mark_attendance_no.
+				inEverJoined = false;
+				leadEmail = lead.get("Email");
+				if(leadEmail != null && ever_joined_emails != null && ever_joined_emails.trim() != "" && ever_joined_emails != "null")
+				{
+					emailL = leadEmail.toLowerCase().trim();
+					ejCsv = "," + ever_joined_emails.toLowerCase() + ",";
+					if(ejCsv.contains("," + emailL + ","))
+					{
+						inEverJoined = true;
+					}
+				}
 				if(sessionDay == "Day 1")
 				{
 					if(day1Blank)
+					{
+						recMap.put("Day_1_Attendance","Absent");
+						needsUpdate = true;
+					}
+					else if(day1.toString() == "No" && !inEverJoined)
 					{
 						recMap.put("Day_1_Attendance","Absent");
 						needsUpdate = true;
@@ -151,7 +168,17 @@ for each lead in allLeads
 						recMap.put("Day_1_Attendance","Absent");
 						needsUpdate = true;
 					}
+					else if(day1 != null && day1.toString() == "No" && !inEverJoined)
+					{
+						recMap.put("Day_1_Attendance","Absent");
+						needsUpdate = true;
+					}
 					if(day2Blank)
+					{
+						recMap.put("Day_2_Attendance","Absent");
+						needsUpdate = true;
+					}
+					else if(day2.toString() == "No" && !inEverJoined)
 					{
 						recMap.put("Day_2_Attendance","Absent");
 						needsUpdate = true;

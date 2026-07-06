@@ -18,12 +18,27 @@ Enable event subscription: **`meeting.started`** (in addition to join/leave/ende
 | condition6 | `meeting.ended` + Day 2 topic | `mark_mc_completed` only |
 
 **Remove or disable:**
-- `attendance.mark_no` branch (MC no longer sends this)
 - `set_blank_automation_not_attended` on meeting.ended
+
+**Add:**
+- `attendance.mark_no` → `mark_attendance_no` (T+30: joined but not in room at final check)
 
 ## Parameter mapping
 
 ### mark_attendance_yes
+
+| Param | Value |
+|-------|--------|
+| meeting_id | `${webhookTrigger.payload.meeting_id}` |
+| participant_email | `${webhookTrigger.payload.participant_email}` |
+| participant_name | `${webhookTrigger.payload.participant_name}` |
+| meeting_topic | `${webhookTrigger.payload.meeting_topic}` |
+| batch_date | `${webhookTrigger.payload.batch_date}` |
+| session_date | `${webhookTrigger.payload.session_date}` |
+
+### mark_attendance_no (T+30 — dropped: was in room at T+15, left before T+30 → **No**)
+
+Same mapping as `mark_attendance_yes`.
 
 | Param | Value |
 |-------|--------|
@@ -50,7 +65,8 @@ Enable event subscription: **`meeting.started`** (in addition to join/leave/ende
 |-----------|----------------|
 | In meeting at T+15 or T+30 | `mark_attendance_yes` → **Yes** in CRM, or **unmatched sheet** if no lead |
 | Joined but left before T+15 | `mark_attendance_lookup` → CRM lead gets **No** via batch; guest → **sheet** |
-| Never joined (CRM lead) | Batch **first** → No, **final** → Absent |
+| Never joined Zoom (CRM lead) | Batch **first** → No (sales); **final** → **Absent** |
+| Joined but left before T+30 | `mark_attendance_no` → **No** |
 | No email and no name on join | Bridge skips (cannot identify) |
 
 ### mark_batch_attendance_checkpoint (first_check)
@@ -61,6 +77,7 @@ Enable event subscription: **`meeting.started`** (in addition to join/leave/ende
 | meeting_topic | `${webhookTrigger.payload.meeting_topic}` |
 | batch_date | `${webhookTrigger.payload.batch_date}` |
 | check_type | `first` (literal) |
+| ever_joined_emails | *(leave empty)* |
 
 ### mark_batch_attendance_checkpoint (final_check)
 
@@ -70,6 +87,7 @@ Enable event subscription: **`meeting.started`** (in addition to join/leave/ende
 | meeting_topic | `${webhookTrigger.payload.meeting_topic}` |
 | batch_date | `${webhookTrigger.payload.batch_date}` |
 | check_type | `final` (literal) |
+| ever_joined_emails | `${webhookTrigger.payload.ever_joined_emails}` |
 
 ### mark_mc_completed (Day 2 only)
 
@@ -82,10 +100,10 @@ Enable event subscription: **`meeting.started`** (in addition to join/leave/ende
 ```
 T+0   meeting.started → bridge schedules sweeps
 T+15  mark_yes (in meeting) + lookup (joined-left) + first_check → blank batch → No
-T+30  mark_yes (in meeting) + final_check → blank batch → Absent
+T+30  mark_yes (in room) + mark_no (dropped → No) + final_check → never joined → Absent
 End   meeting.ended → mark_mc_completed (Day 2 only)
 ```
 
 ## 100BM
 
-Unchanged — `/100bm` route still uses 30-min timer and separate Flow (if configured).
+Uses the same T+15 / T+30 checkpoint model on `/100bm`. See **`100BM_CHECKPOINT_FLOW_WIRING.md`** for Zoho Flow setup and separate Deluge functions (`mark_100bm_*`).

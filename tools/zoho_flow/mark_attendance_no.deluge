@@ -1,0 +1,144 @@
+void mark_attendance_no(string meeting_id, string participant_email, string participant_name, string meeting_topic, string batch_date, string session_date)
+{
+info "MARK NO: email=" + participant_email + " name=" + participant_name + " topic=" + meeting_topic + " batch=" + batch_date;
+if(meeting_topic == null || meeting_topic.trim() == "" || meeting_topic == "null")
+{
+	info "No meeting topic - skipping";
+	return;
+}
+attendance_field = "";
+topicL = meeting_topic.toLowerCase();
+if(topicL.contains("bhag") || topicL.contains("breakthrough actions"))
+{
+	attendance_field = "Day_1_Attendance";
+}
+else if(topicL.contains("art of war") || topicL.contains("shameless pitching"))
+{
+	attendance_field = "Day_2_Attendance";
+}
+else
+{
+	info "Unknown topic - skipping: " + meeting_topic;
+	return;
+}
+if(batch_date == null || batch_date.trim() == "" || batch_date == "null")
+{
+	if(session_date != null && session_date.trim() != "" && session_date != "null")
+	{
+		if(attendance_field == "Day_1_Attendance")
+		{
+			batch_date = session_date;
+		}
+		else
+		{
+			meetingDt = session_date.toTime("yyyy-MM-dd");
+			batch_date = (meetingDt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
+		}
+	}
+}
+if(batch_date == null || batch_date.trim() == "" || batch_date == "null")
+{
+	info "batch_date missing - skipping";
+	return;
+}
+batch_ddMMyyyy = batch_date.subString(8,10) + "-" + batch_date.subString(5,7) + "-" + batch_date.subString(0,4);
+lead_list = List();
+if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
+{
+	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")and(Payment_Status:equals:Completed)",1,5);
+	if(ls != null && ls.size() > 0)
+	{
+		matchedLead = null;
+		for each  cand in ls
+		{
+			leadDate = cand.get("MC_Start_Date_Time");
+			if(leadDate != null)
+			{
+				dateYMD = leadDate.toString("yyyy-MM-dd");
+				dateDMY = leadDate.toString("dd-MM-yyyy");
+				rawDate = leadDate.toString();
+				if(dateYMD == batch_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_date) || rawDate.contains(batch_ddMMyyyy))
+				{
+					matchedLead = cand;
+				}
+			}
+		}
+		if(matchedLead != null)
+		{
+			lead_list.add(matchedLead);
+		}
+	}
+}
+if(lead_list == null || lead_list.size() == 0)
+{
+	if(participant_name != null && participant_name.trim() != "" && participant_name != "null")
+	{
+		clean_name = participant_name.replaceAll("Ms. ","").replaceAll("Mr. ","").replaceAll("Mrs. ","").replaceAll("Dr. ","").replaceAll("Prof. ","").replaceAll("Miss ","").replaceAll("Rev. ","").trim();
+		if(clean_name.length() > 0)
+		{
+			space_idx = clean_name.indexOf(" ");
+			if(space_idx > 0)
+			{
+				raw_first = clean_name.substring(0,space_idx).trim();
+				last_space_idx = clean_name.lastIndexOf(" ");
+				raw_last = clean_name.substring(last_space_idx + 1).trim();
+				if(raw_first.length() > 1 && raw_last.length() > 1)
+				{
+					first_tc = raw_first.substring(0,1).toUpperCase() + raw_first.substring(1).toLowerCase();
+					last_tc = raw_last.substring(0,1).toUpperCase() + raw_last.substring(1).toLowerCase();
+					lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + first_tc + ")and(Last_Name:equals:" + last_tc + ")and(Payment_Status:equals:Completed)",1,5);
+				}
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name + ")and(Payment_Status:equals:Completed)",1,5);
+				}
+			}
+			else
+			{
+				name_tc = clean_name.substring(0,1).toUpperCase() + clean_name.substring(1).toLowerCase();
+				lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + name_tc + ")and(Payment_Status:equals:Completed)",1,5);
+			}
+			if(lead_list != null && lead_list.size() > 0)
+			{
+				filtered = List();
+				for each  cand in lead_list
+				{
+					leadDate = cand.get("MC_Start_Date_Time");
+					if(leadDate != null)
+					{
+						dateYMD = leadDate.toString("yyyy-MM-dd");
+						dateDMY = leadDate.toString("dd-MM-yyyy");
+						rawDate = leadDate.toString();
+						if(dateYMD == batch_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_date) || rawDate.contains(batch_ddMMyyyy))
+						{
+							filtered.add(cand);
+						}
+					}
+				}
+				lead_list = filtered;
+			}
+		}
+	}
+}
+if(lead_list == null || lead_list.size() == 0)
+{
+	info "MARK NO: lead not found - skipping";
+	return;
+}
+lead = lead_list.get(0);
+lead_id = lead.get("id").toString();
+existing = "";
+if(lead.get(attendance_field) != null)
+{
+	existing = lead.get(attendance_field).toString();
+}
+if(existing == "No")
+{
+	info "Already No - skip";
+	return;
+}
+update_map = Map();
+update_map.put(attendance_field,"No");
+zoho.crm.updateRecord("Leads",lead_id,update_map);
+info "MARKED NO: lead=" + lead_id + " field=" + attendance_field + " was=" + existing;
+}

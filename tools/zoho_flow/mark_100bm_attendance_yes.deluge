@@ -1,0 +1,181 @@
+// Zoho Flow custom function — 100BM checkpoint attendance (T+15 / T+30 present in meeting)
+// Signature: void mark_100bm_attendance_yes(string meeting_id, string participant_email, string participant_name, string meeting_topic, string session_date)
+// Connection: zoho_flow_to_zoho_crm
+//
+// Flow mapping:
+//   meeting_id        = ${webhookTrigger.payload.meeting_id}
+//   participant_email = ${webhookTrigger.payload.participant_email}
+//   participant_name  = ${webhookTrigger.payload.participant_name}
+//   meeting_topic     = ${webhookTrigger.payload.meeting_topic}
+//   session_date      = ${webhookTrigger.payload.session_date}
+
+void mark_100bm_attendance_yes(string meeting_id, string participant_email, string participant_name, string meeting_topic, string session_date)
+{
+info "100BM YES: email=" + participant_email + " name=" + participant_name + " topic=" + meeting_topic + " session=" + session_date;
+if(meeting_topic == null || meeting_topic.trim() == "" || meeting_topic == "null")
+{
+	info "100BM YES: no meeting topic - skipping";
+	return;
+}
+topicL = meeting_topic.toLowerCase();
+if(!topicL.contains("orientation session") && !topicL.contains("fast track your leadership growth"))
+{
+	info "100BM YES: unknown topic - skipping: " + meeting_topic;
+	return;
+}
+if(session_date == null || session_date.trim() == "" || session_date == "null")
+{
+	info "100BM YES: session_date missing - skipping";
+	return;
+}
+session_ddMMyyyy = session_date.subString(8,10) + "-" + session_date.subString(5,7) + "-" + session_date.subString(0,4);
+lead_list = List();
+// --- Find lead: email first ---
+if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
+{
+	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")",1,5);
+	if(ls != null && ls.size() > 0)
+	{
+		for each cand in ls
+		{
+			inviteDate = cand.get("FT_Invite_Date");
+			if(inviteDate != null)
+			{
+				dateYMD = inviteDate.toString("yyyy-MM-dd");
+				dateDMY = inviteDate.toString("dd-MM-yyyy");
+				rawDate = inviteDate.toString();
+				if(dateYMD == session_date || dateDMY == session_ddMMyyyy || rawDate.contains(session_date) || rawDate.contains(session_ddMMyyyy))
+				{
+					lead_list.add(cand);
+					break;
+				}
+			}
+		}
+	}
+}
+// --- Name fallback ---
+if(lead_list == null || lead_list.size() == 0)
+{
+	if(participant_name != null && participant_name.trim() != "" && participant_name != "null")
+	{
+		clean_name = participant_name.replaceAll("Ms. ","").replaceAll("Mr. ","").replaceAll("Mrs. ","").replaceAll("Dr. ","").replaceAll("Prof. ","").replaceAll("Miss ","").replaceAll("Rev. ","").trim();
+		if(clean_name.length() > 0)
+		{
+			space_idx = clean_name.indexOf(" ");
+			if(space_idx > 0)
+			{
+				raw_first = clean_name.substring(0,space_idx).trim();
+				last_space_idx = clean_name.lastIndexOf(" ");
+				raw_last = clean_name.substring(last_space_idx + 1).trim();
+				if(raw_first.length() > 1 && raw_last.length() > 1)
+				{
+					first_tc = raw_first.substring(0,1).toUpperCase() + raw_first.substring(1).toLowerCase();
+					last_tc = raw_last.substring(0,1).toUpperCase() + raw_last.substring(1).toLowerCase();
+					lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + first_tc + ")and(Last_Name:equals:" + last_tc + ")",1,5);
+					if(lead_list == null || lead_list.size() == 0)
+					{
+						lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + raw_first.toUpperCase() + ")and(Last_Name:equals:" + raw_last.toUpperCase() + ")",1,5);
+					}
+					if(lead_list == null || lead_list.size() == 0)
+					{
+						lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + raw_first.toLowerCase() + ")and(Last_Name:equals:" + raw_last.toLowerCase() + ")",1,5);
+					}
+				}
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name + ")",1,5);
+				}
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name.toUpperCase() + ")",1,5);
+				}
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name.toLowerCase() + ")",1,5);
+				}
+			}
+			else
+			{
+				name_tc = clean_name.substring(0,1).toUpperCase() + clean_name.substring(1).toLowerCase();
+				lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + name_tc + ")",1,5);
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + name_tc + ")",1,5);
+				}
+			}
+			if(lead_list != null && lead_list.size() > 0)
+			{
+				filtered = List();
+				for each cand in lead_list
+				{
+					inviteDate = cand.get("FT_Invite_Date");
+					if(inviteDate != null)
+					{
+						dateYMD = inviteDate.toString("yyyy-MM-dd");
+						dateDMY = inviteDate.toString("dd-MM-yyyy");
+						rawDate = inviteDate.toString();
+						if(dateYMD == session_date || dateDMY == session_ddMMyyyy || rawDate.contains(session_date) || rawDate.contains(session_ddMMyyyy))
+						{
+							filtered.add(cand);
+						}
+					}
+				}
+				lead_list = filtered;
+			}
+		}
+	}
+}
+if(lead_list == null || lead_list.size() == 0)
+{
+	info "100BM YES: lead not found or not eligible - adding to unmatched sheet";
+	safe_name = "";
+	if(participant_name != null)
+	{
+		safe_name = participant_name.replaceAll("\"","'");
+	}
+	safe_email = "";
+	if(participant_email != null)
+	{
+		safe_email = participant_email.replaceAll("\"","'");
+	}
+	timestamp_str = zoho.currenttime.toString("yyyy-MM-dd HH:mm:ss");
+	json_data_str = '[{"Timestamp":"' + timestamp_str + '","Name":"' + safe_name + '","Email":"' + safe_email + '","Session":"100BM FT","Duration (mins)":"15+"}]';
+	sheet_param = Map();
+	sheet_param.put("method","worksheet.jsondata.append");
+	sheet_param.put("worksheet_name","Sheet1");
+	sheet_param.put("header_row","1");
+	sheet_param.put("json_data",json_data_str);
+	sheet_response = invokeurl
+	[
+		url :"https://sheet.zoho.in/api/v2/6n2nqc1869b674fcd4c47a645f30a6f38fb05"
+		type :POST
+		parameters:sheet_param
+		connection:"zoho_sheet_mc"
+	];
+	info "100BM YES unmatched sheet: " + sheet_response.toString();
+	return;
+}
+lead = lead_list.get(0);
+lead_id = lead.get("id").toString();
+existing = "";
+if(lead.get("FT_attendance") != null)
+{
+	existing = lead.get("FT_attendance").toString();
+}
+if(existing == "Yes")
+{
+	info "100BM YES: already Yes - skip";
+	return;
+}
+// FT_attended_date = session date (meeting day in IST); fallback to today if session_date missing
+attended_date = session_date;
+if(attended_date == null || attended_date.trim() == "" || attended_date == "null")
+{
+	attended_date = zoho.currenttime.toString("yyyy-MM-dd");
+}
+update_map = Map();
+update_map.put("FT_attendance","Yes");
+update_map.put("FT_attended_date",attended_date);
+zoho.crm.updateRecord("Leads",lead_id,update_map);
+info "100BM MARKED YES: lead=" + lead_id + " FT_attendance=Yes FT_attended_date=" + attended_date;
+}
