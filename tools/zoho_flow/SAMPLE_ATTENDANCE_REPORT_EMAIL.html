@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sample MC Attendance Report Emails</title>
+<style>
+  body { background:#f4f4f7; margin:0; padding:24px; font-family:Segoe UI,Arial,sans-serif; }
+  .mailwrap { max-width:820px; margin:0 auto 32px; background:#fff; border:1px solid #ddd; border-radius:8px; overflow:hidden; }
+  .mailhead { background:#2b2b3a; color:#fff; padding:10px 18px; font-size:13px; }
+  .mailhead b { color:#fff; }
+  .mailbody { padding:18px 22px; }
+  h2 { margin:0 0 6px; }
+  h3 { margin-top:22px; }
+  table { border-collapse:collapse; font-size:13px; }
+  th, td { border:1px solid #ccc; padding:6px 10px; text-align:left; }
+  th { background:#f0f0f0; }
+  ul { padding-left:18px; }
+  .note { color:#888; font-size:12px; }
+</style>
+</head>
+<body>
+
+<!-- ============ EMAIL 1: FIRST CHECK ============ -->
+<div class="mailwrap">
+  <div class="mailhead">
+    <div><b>Subject:</b> MC Attendance — First Check (15 minutes) — Day 1 2026-07-07 (Yes 2 / No 3)</div>
+    <div><b>To:</b> ironladytech@gmail.com</div>
+  </div>
+  <div class="mailbody">
+    <div style="font-family:Segoe UI,Arial,sans-serif;color:#222;">
+      <h2>MC Attendance Report — First Check (15 minutes)</h2>
+      <p><b>Day 1</b> &nbsp;|&nbsp; Batch: <b>2026-07-07</b> &nbsp;|&nbsp; Session: Session on BHAG and Breakthrough Actions</p>
+      <p style="font-size:15px;">Yes: <b>2</b> &nbsp;|&nbsp; No: <b>3</b> &nbsp;|&nbsp; Total matched: <b>5</b></p>
+      <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:13px;">
+        <tr style="background:#f0f0f0;"><th>#</th><th>Email</th><th>Name</th><th>Status</th><th>Reason</th></tr>
+        <tr style="background:#e8f5e9;"><td>1</td><td>priya@example.com</td><td>Priya Sharma</td><td><b>Yes</b></td><td>In Zoom room at 15-min check</td></tr>
+        <tr style="background:#fff8e1;"><td>2</td><td>rahul@example.com</td><td>Rahul Verma</td><td><b>No</b></td><td>Not in room at 15 min (never joined or left early)</td></tr>
+        <tr style="background:#fff8e1;"><td>3</td><td>sneha@example.com</td><td>Sneha Iyer</td><td><b>No</b></td><td>Not in room at 15 min (never joined or left early)</td></tr>
+        <tr style="background:#e8f5e9;"><td>4</td><td>arjun@example.com</td><td>Arjun Rao</td><td><b>Yes</b></td><td>In Zoom room at 15-min check</td></tr>
+        <tr style="background:#fff8e1;"><td>5</td><td>meena@example.com</td><td>Meena Nair</td><td><b>No</b></td><td>Not in room at 15 min (never joined or left early)</td></tr>
+      </table>
+      <h3>Guests / Unmatched (joined Zoom, no CRM match)</h3>
+      <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:13px;">
+        <tr style="background:#f0f0f0;"><th>#</th><th>Email</th><th>Status</th><th>Note</th></tr>
+        <tr style="background:#ede7f6;"><td>1</td><td>unknown@gmail.com</td><td><b>Yes</b> (guest)</td><td>In Zoom room at this check — no CRM match, needs manual review</td></tr>
+      </table>
+      <h3>What the statuses mean</h3>
+      <ul>
+        <li><b>Yes</b> — present in the room at the 15-minute mark.</li>
+        <li><b>No</b> — not in the room at 15 min (never joined, running late, or left early). Sales can call the No list.</li>
+      </ul>
+      <p class="note">Statuses are matched by email. Guests are people who joined Zoom with an email not found in CRM for this batch.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ EMAIL 2: FINAL CHECK ============ -->
+<div class="mailwrap">
+  <div class="mailhead">
+    <div><b>Subject:</b> MC Attendance — Final Check (30 minutes) — Day 1 2026-07-07 (Yes 2 / No 2 / Absent 1)</div>
+    <div><b>To:</b> ironladytech@gmail.com</div>
+  </div>
+  <div class="mailbody">
+    <div style="font-family:Segoe UI,Arial,sans-serif;color:#222;">
+      <h2>MC Attendance Report — Final Check (30 minutes)</h2>
+      <p><b>Day 1</b> &nbsp;|&nbsp; Batch: <b>2026-07-07</b> &nbsp;|&nbsp; Session: Session on BHAG and Breakthrough Actions</p>
+      <p style="font-size:15px;">Yes: <b>2</b> &nbsp;|&nbsp; No: <b>2</b> &nbsp;|&nbsp; Absent: <b>1</b> &nbsp;|&nbsp; Total matched: <b>5</b></p>
+      <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:13px;">
+        <tr style="background:#f0f0f0;"><th>#</th><th>Email</th><th>Name</th><th>Status</th><th>Reason</th></tr>
+        <tr style="background:#e8f5e9;"><td>1</td><td>priya@example.com</td><td>Priya Sharma</td><td><b>Yes</b></td><td>In Zoom room at 30-min check</td></tr>
+        <tr style="background:#e8f5e9;"><td>2</td><td>rahul@example.com</td><td>Rahul Verma</td><td><b>Yes</b></td><td>In Zoom room at 30-min check</td></tr>
+        <tr style="background:#fff8e1;"><td>3</td><td>sneha@example.com</td><td>Sneha Iyer</td><td><b>No</b></td><td>Joined but left before 30 min (dropout)</td></tr>
+        <tr style="background:#fff8e1;"><td>4</td><td>arjun@example.com</td><td>Arjun Rao</td><td><b>No</b></td><td>Joined but left before 30 min (dropout)</td></tr>
+        <tr style="background:#ffebee;"><td>5</td><td>meena@example.com</td><td>Meena Nair</td><td><b>Absent</b></td><td>Never joined Zoom during the session</td></tr>
+      </table>
+      <h3>Guests / Unmatched (joined Zoom, no CRM match)</h3>
+      <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;font-size:13px;">
+        <tr style="background:#f0f0f0;"><th>#</th><th>Email</th><th>Status</th><th>Note</th></tr>
+        <tr style="background:#ede7f6;"><td>1</td><td>unknown@gmail.com</td><td><b>No</b> (guest)</td><td>Joined but left before this check — no CRM match, needs manual review</td></tr>
+      </table>
+      <h3>What the statuses mean</h3>
+      <ul>
+        <li><b>Yes</b> — in the room at the 30-minute mark (includes late joiners upgraded from No).</li>
+        <li><b>No</b> — joined at some point but left before 30 min (dropout).</li>
+        <li><b>Absent</b> — never joined Zoom during the session.</li>
+      </ul>
+      <p class="note">Statuses are matched by email. Guests are people who joined Zoom with an email not found in CRM for this batch.</p>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

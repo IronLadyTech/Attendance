@@ -12,8 +12,8 @@ Enable event subscription: **`meeting.started`** (in addition to join/leave/ende
 |-----------|-------|--------|
 | condition1 | `attendance.mark_yes` | `mark_attendance_yes` |
 | condition2 | `attendance.lookup` | `mark_attendance_lookup` (joined but left before T+15) |
-| condition3 | `attendance.first_check` | `mark_batch_attendance_checkpoint` (check_type = **first**) |
-| condition4 | `attendance.final_check` | `mark_batch_attendance_checkpoint` (check_type = **final**) |
+| condition3 | `attendance.first_check` | `mark_batch_attendance_checkpoint` (check_type = **first**) **+** `send_attendance_report` (check_type = **first**) |
+| condition4 | `attendance.final_check` | `mark_batch_attendance_checkpoint` (check_type = **final**) **+** `send_attendance_report` (check_type = **final**) |
 | condition5 | `meeting.ended` + Day 1 topic | *(none)* |
 | condition6 | `meeting.ended` + Day 2 topic | `mark_mc_completed` only |
 
@@ -90,6 +90,23 @@ Same mapping as `mark_attendance_yes`.
 | check_type | `final` (literal) |
 | ever_joined_emails | `${webhookTrigger.payload.ever_joined_emails}` |
 | present_emails | `${webhookTrigger.payload.present_emails}` |
+
+> Note: the bridge now also sends `ever_joined_emails` and `present_emails` on **first_check**. For the attendance update they can stay empty on first_check, but `send_attendance_report` needs them (see below).
+
+### send_attendance_report (first_check AND final_check — second action on each branch)
+
+Same signature and mapping as `mark_batch_attendance_checkpoint`. Map ALL six params from the payload (do **not** leave the email lists empty — the report needs them):
+
+| Param | Value |
+|-------|--------|
+| start_time | `${webhookTrigger.payload.start_time}` |
+| meeting_topic | `${webhookTrigger.payload.meeting_topic}` |
+| batch_date | `${webhookTrigger.payload.batch_date}` |
+| check_type | `first` on the first_check branch / `final` on the final_check branch (literal) |
+| ever_joined_emails | `${webhookTrigger.payload.ever_joined_emails}` |
+| present_emails | `${webhookTrigger.payload.present_emails}` |
+
+Emails the report to `ironladytech@gmail.com` (change `reportTo` in the function to adjust). Per-participant Yes/No/Absent + reason, counts, and a guests section for joiners with no CRM match.
 
 ### mark_mc_completed (Day 2 only)
 

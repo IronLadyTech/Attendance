@@ -266,9 +266,10 @@ def _mc_sweep(meeting_id: str, sweep: int) -> None:
     event = "attendance.first_check" if sweep == 1 else "attendance.final_check"
     payload = _mc_base_payload(state)
     payload["event"] = event
-    if sweep == 2:
-        payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
-        payload["present_emails"] = _roster_email_csv(roster)
+    # Send join lists on BOTH checks so the attendance report (first + final) can compute
+    # Yes/No/Absent and detect guests. present = in room at this checkpoint.
+    payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
+    payload["present_emails"] = _roster_email_csv(roster)
     _post_to_zoho(forward_url, payload, f"mc-sweep{sweep}")
 
 

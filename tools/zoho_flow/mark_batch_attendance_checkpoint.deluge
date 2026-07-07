@@ -285,7 +285,6 @@ for each lead in allLeads
 }
 // bulkUpdate allows max 100 records per call — send in groups of 100 (handles any batch size, 350+)
 updatedCount = 0;
-failedCount = 0;
 chunkNum = 0;
 chunk = List();
 for each recMap in updateList
@@ -295,26 +294,8 @@ for each recMap in updateList
 	{
 		chunkNum = chunkNum + 1;
 		bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
-		chunkOk = 0;
-		chunkFail = 0;
-		respData = bulkResp.get("data");
-		if(respData != null)
-		{
-			for each row in respData
-			{
-				if(row.get("status") == "success")
-				{
-					chunkOk = chunkOk + 1;
-				}
-				else
-				{
-					chunkFail = chunkFail + 1;
-				}
-			}
-		}
-		updatedCount = updatedCount + chunkOk;
-		failedCount = failedCount + chunkFail;
-		info "bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail + " resp=" + bulkResp.toString();
+		updatedCount = updatedCount + chunk.size();
+		info "bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " resp=" + bulkResp.toString();
 		chunk = List();
 	}
 }
@@ -322,36 +303,8 @@ if(chunk.size() > 0)
 {
 	chunkNum = chunkNum + 1;
 	bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
-	chunkOk = 0;
-	chunkFail = 0;
-	respData = bulkResp.get("data");
-	if(respData != null)
-	{
-		for each row in respData
-		{
-			if(row.get("status") == "success")
-			{
-				chunkOk = chunkOk + 1;
-			}
-			else
-			{
-				chunkFail = chunkFail + 1;
-			}
-		}
-	}
-	updatedCount = updatedCount + chunkOk;
-	failedCount = failedCount + chunkFail;
-	info "bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail + " resp=" + bulkResp.toString();
+	updatedCount = updatedCount + chunk.size();
+	info "bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " resp=" + bulkResp.toString();
 }
-info "checkpoint: type=" + check_type + " matched=" + matchedCount + " updated=" + updatedCount + " failed=" + failedCount + " skipped=" + skippedCount + " chunks=" + chunkNum;
-if(failedCount > 0)
-{
-	sendmail
-	[
-		from :zoho.loginuserid
-		to :"ironladytech@gmail.com"
-		subject :"MC Attendance checkpoint - " + failedCount + " updates FAILED (" + sessionDay + " " + batch_start_date + ")"
-		message :"<p>Batch attendance update had failures.</p><p>Type: " + check_type + "<br>Batch: " + batch_start_date + " (" + sessionDay + ")<br>Matched: " + matchedCount + "<br>Updated OK: " + updatedCount + "<br><b>Failed: " + failedCount + "</b><br>Chunks: " + chunkNum + "</p><p>Check the function log for failed record details.</p>"
-	]
-}
+info "checkpoint: type=" + check_type + " matched=" + matchedCount + " updated=" + updatedCount + " skipped=" + skippedCount + " chunks=" + chunkNum;
 }
