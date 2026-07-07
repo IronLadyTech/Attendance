@@ -67,8 +67,16 @@ if(batch_start_date == null || batch_start_date.trim() == "" || batch_start_date
 }
 batch_ddMMyyyy = batch_start_date.subString(8,10) + "-" + batch_start_date.subString(5,7) + "-" + batch_start_date.subString(0,4);
 info "checkpoint: type=" + check_type + " session=" + sessionDay + " batch=" + batch_start_date;
+// Scope search to the batch date (±1 day buffer for timezone edges) so only this batch's
+// leads are fetched — avoids the all-time "Completed" pool outgrowing the page cap and keeps
+// the decision loop small (≈ batch size, not every paid lead ever).
+batchDt = batch_start_date.toTime("yyyy-MM-dd");
+rangeStartDate = (batchDt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
+rangeEndDate = (batchDt.toLong() + 86400000).toTime().toString("yyyy-MM-dd");
+rangeStart = rangeStartDate + "T00:00:00+05:30";
+rangeEnd = rangeEndDate + "T23:59:59+05:30";
 // Payment_Status (UI: MC Payment Status) = Completed — NO Lead_Status filter
-searchCriteria = "(Payment_Status:equals:Completed)";
+searchCriteria = "(Payment_Status:equals:Completed)and(MC_Start_Date_Time:between:" + rangeStart + "," + rangeEnd + ")";
 allLeads = List();
 pageNums = {1,2,3,4,5,6,7,8,9,10};
 for each pageNum in pageNums
@@ -77,13 +85,17 @@ for each pageNum in pageNums
 	if(pageLeads != null && pageLeads.size() > 0)
 	{
 		allLeads.addAll(pageLeads);
+		if(pageLeads.size() < 200)
+		{
+			break;
+		}
 	}
 	else
 	{
 		break;
 	}
 }
-info "Total CRM leads fetched: " + allLeads.size();
+info "Total CRM leads fetched (batch-scoped): " + allLeads.size();
 updateList = List();
 skippedCount = 0;
 matchedCount = 0;
@@ -277,33 +289,77 @@ for each lead in allLeads
 		}
 	}
 }
+// bulkUpdate allows max 100 records per call — send in groups of 100 (handles any batch size, 350+)
 updatedCount = 0;
-chunk1 = List();
-chunk2 = List();
-chunkIdx = 0;
+failedCount = 0;
+chunkNum = 0;
+chunk = List();
+chunk.clear();
 for each recMap in updateList
 {
-	if(chunkIdx < 100)
+	chunk.add(recMap);
+	if(chunk.size() == 100)
 	{
-		chunk1.add(recMap);
+		chunkNum = chunkNum + 1;
+		bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+		chunkOk = 0;
+		chunkFail = 0;
+		respData = bulkResp.get("data");
+		if(respData != null)
+		{
+			for each row in respData
+			{
+				if(row.get("status") == "success")
+				{
+					chunkOk = chunkOk + 1;
+				}
+				else
+				{
+					chunkFail = chunkFail + 1;
+				}
+			}
+		}
+		updatedCount = updatedCount + chunkOk;
+		failedCount = failedCount + chunkFail;
+		info "bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail + " resp=" + bulkResp.toString();
+		chunk = List();
+		chunk.clear();
 	}
-	else
+}
+if(chunk.size() > 0)
+{
+	chunkNum = chunkNum + 1;
+	bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+	chunkOk = 0;
+	chunkFail = 0;
+	respData = bulkResp.get("data");
+	if(respData != null)
 	{
-		chunk2.add(recMap);
+		for each row in respData
+		{
+			if(row.get("status") == "success")
+			{
+				chunkOk = chunkOk + 1;
+			}
+			else
+			{
+				chunkFail = chunkFail + 1;
+			}
+		}
 	}
-	chunkIdx = chunkIdx + 1;
+	updatedCount = updatedCount + chunkOk;
+	failedCount = failedCount + chunkFail;
+	info "bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail + " resp=" + bulkResp.toString();
 }
-if(chunk1.size() > 0)
+info "checkpoint: type=" + check_type + " matched=" + matchedCount + " updated=" + updatedCount + " failed=" + failedCount + " skipped=" + skippedCount + " chunks=" + chunkNum;
+if(failedCount > 0)
 {
-	bulkResp1 = zoho.crm.bulkUpdate("Leads",chunk1);
-	info "bulkUpdate chunk1: " + bulkResp1.toString();
-	updatedCount = updatedCount + chunk1.size();
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com"
+		subject :"MC Attendance checkpoint - " + failedCount + " updates FAILED (" + sessionDay + " " + batch_start_date + ")"
+		message :"<p>Batch attendance update had failures.</p><p>Type: " + check_type + "<br>Batch: " + batch_start_date + " (" + sessionDay + ")<br>Matched: " + matchedCount + "<br>Updated OK: " + updatedCount + "<br><b>Failed: " + failedCount + "</b><br>Chunks: " + chunkNum + "</p><p>Check the function log for failed record details.</p>"
+	]
 }
-if(chunk2.size() > 0)
-{
-	bulkResp2 = zoho.crm.bulkUpdate("Leads",chunk2);
-	info "bulkUpdate chunk2: " + bulkResp2.toString();
-	updatedCount = updatedCount + chunk2.size();
-}
-info "checkpoint: type=" + check_type + " matched=" + matchedCount + " updated=" + updatedCount + " skipped=" + skippedCount;
 }

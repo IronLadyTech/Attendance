@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MC Attendance — Explained</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 24px; color: #222; line-height: 1.5; }
+    h1 { font-size: 1.8em; border-bottom: 2px solid #333; padding-bottom: 8px; }
+    h2 { font-size: 1.3em; margin-top: 1.6em; color: #111; }
+    h3 { font-size: 1.1em; margin-top: 1.2em; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 0.95em; }
+    th, td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+    th { background: #f0f0f0; }
+    pre { background: #f5f5f5; padding: 12px; font-size: 0.85em; overflow-x: auto; }
+    blockquote { border-left: 4px solid #666; margin: 16px 0; padding: 8px 16px; background: #fafafa; }
+    hr { border: none; border-top: 1px solid #ddd; margin: 24px 0; }
+    ul, ol { padding-left: 1.4em; }
+    @media print { body { margin: 0; max-width: none; } }
+  </style>
+</head>
+<body>
+
+<h1>MC Attendance — Explained</h1>
+<p>Plain-language guide for RM / sales / ops: how attendance is tracked and what appears in CRM.</p>
+
+<h2>Overview</h2>
+<p>When an MC Zoom session runs, the system <strong>automatically updates attendance in Zoho CRM</strong> for paid batch leads. It checks at <strong>two fixed times</strong>:</p>
+<table>
+  <tr><th>Checkpoint</th><th>When</th><th>Purpose</th></tr>
+  <tr><td><strong>First check</strong></td><td>15 minutes in</td><td>Mark who is in the room; flag missing leads as <strong>No</strong> so sales can call</td></tr>
+  <tr><td><strong>Final check</strong></td><td>30 minutes in</td><td>Final <strong>Yes / No / Absent</strong> for everyone</td></tr>
+</table>
+<p>Nothing is marked at join time. CRM updates only at <strong>15 min</strong> and <strong>30 min</strong>.</p>
+
+<h2>The three attendance values in CRM</h2>
+<table>
+  <tr><th>Value</th><th>Meaning</th></tr>
+  <tr><td><strong>Yes</strong></td><td>In the Zoom room at the <strong>30-minute</strong> check</td></tr>
+  <tr><td><strong>No</strong></td><td>Not in the room at 15 min, <strong>or</strong> joined but left before 30 min</td></tr>
+  <tr><td><strong>Absent</strong></td><td>Paid batch lead who <strong>never joined Zoom</strong> (confirmed at 30 min)</td></tr>
+</table>
+<p><strong>Important for sales:</strong> <strong>No at 15 min does not mean absent.</strong> It means <em>“not in the room right now”</em> — they may still join before 30 min and become <strong>Yes</strong>.</p>
+
+<h2>Quick reference — all situations</h2>
+<table>
+  <tr><th>Situation</th><th>At 15 min</th><th>At 30 min (final)</th></tr>
+  <tr><td>In Zoom the whole time</td><td><strong>Yes</strong></td><td><strong>Yes</strong></td></tr>
+  <tr><td>Joins late (after 15 min) but stays till 30 min</td><td><strong>No</strong></td><td><strong>Yes</strong></td></tr>
+  <tr><td>Joins, leaves before 15 min</td><td><strong>No</strong></td><td><strong>No</strong></td></tr>
+  <tr><td>Joins, leaves before 30 min (after 15 min)</td><td><strong>Yes</strong> or <strong>No</strong></td><td><strong>No</strong></td></tr>
+  <tr><td>Never joins Zoom (paid batch)</td><td><strong>No</strong></td><td><strong>Absent</strong></td></tr>
+</table>
+<p><strong>Note on row 4:</strong> “Yes or No at 15 min” depends on whether the person was <strong>still in Zoom at the 15-minute mark</strong> — not on when they first joined.</p>
+
+<h2>One participant — Priya (paid batch lead, Day 1)</h2>
+<p>Priya’s email is in Zoho CRM. The system tracks her through the session like this:</p>
+<pre>Minute 0          Minute 15              Minute 30
+Session starts    First check            Final check
+     │                 │                      │
+     ▼                 ▼                      ▼
+  Tracking         CRM updated            CRM final
+  starts           (first result)         (final result)</pre>
+
+<h3>Example A — Stays the whole session</h3>
+<table>
+  <tr><th>Time</th><th>What Priya does</th><th>CRM (Day 1 Attendance)</th></tr>
+  <tr><td>0 min</td><td>Joins Zoom</td><td><em>(blank — not marked yet)</em></td></tr>
+  <tr><td>15 min</td><td>Still in Zoom</td><td><strong>Yes</strong></td></tr>
+  <tr><td>30 min</td><td>Still in Zoom</td><td><strong>Yes</strong></td></tr>
+</table>
+<p>In the room at both checks → <strong>Yes</strong>.</p>
+
+<h3>Example B — Joins late (at 20 min), stays till end</h3>
+<table>
+  <tr><th>Time</th><th>What Priya does</th><th>CRM</th></tr>
+  <tr><td>0 min</td><td>Not joined yet</td><td><em>(blank)</em></td></tr>
+  <tr><td>15 min</td><td>Not in Zoom yet</td><td><strong>No</strong></td></tr>
+  <tr><td>20 min</td><td>Joins Zoom</td><td>Still <strong>No</strong> <em>(next check is at 30 min)</em></td></tr>
+  <tr><td>30 min</td><td>Still in Zoom</td><td><strong>Yes</strong> <em>(upgraded from No)</em></td></tr>
+</table>
+<p>Not in room at 15 min → <strong>No</strong> (sales can call). Joins in time → <strong>Yes</strong> at 30 min.</p>
+
+<h3>Example C — Joins, then leaves at 10 min</h3>
+<table>
+  <tr><th>Time</th><th>What Priya does</th><th>CRM</th></tr>
+  <tr><td>5 min</td><td>Joins Zoom</td><td><em>(blank)</em></td></tr>
+  <tr><td>10 min</td><td>Leaves Zoom</td><td><em>(blank)</em></td></tr>
+  <tr><td>15 min</td><td>Not in Zoom</td><td><strong>No</strong></td></tr>
+  <tr><td>30 min</td><td>Not in Zoom</td><td><strong>No</strong> <em>(final)</em></td></tr>
+</table>
+<p>Joined but left before 15 min → <strong>No</strong> at 15 min, stays <strong>No</strong> at 30 min.</p>
+
+<h3>Example D — Joins, stays till 20 min, then leaves</h3>
+<table>
+  <tr><th>Time</th><th>What Priya does</th><th>CRM</th></tr>
+  <tr><td>0 min</td><td>Joins Zoom</td><td><em>(blank)</em></td></tr>
+  <tr><td>15 min</td><td>Still in Zoom</td><td><strong>Yes</strong></td></tr>
+  <tr><td>20 min</td><td>Leaves Zoom</td><td>Still <strong>Yes</strong> <em>(until 30 min check)</em></td></tr>
+  <tr><td>30 min</td><td>Not in Zoom</td><td><strong>No</strong> <em>(downgraded from Yes)</em></td></tr>
+</table>
+<p>In room at 15 min → <strong>Yes</strong>. Left before 30 min → final <strong>No</strong> (dropout).</p>
+
+<h3>Example E — Never joins Zoom</h3>
+<table>
+  <tr><th>Time</th><th>What Priya does</th><th>CRM</th></tr>
+  <tr><td>0–15 min</td><td>Never joins</td><td><em>(blank → then No)</em></td></tr>
+  <tr><td>15 min</td><td>Not in Zoom</td><td><strong>No</strong> <em>(sales can call)</em></td></tr>
+  <tr><td>30 min</td><td>Still never joined</td><td><strong>Absent</strong> <em>(final)</em></td></tr>
+</table>
+<p><strong>No</strong> at 15 min = not in room yet — please call. <strong>Absent</strong> at 30 min = never showed up on Zoom.</p>
+
+<h2>Simple rule for one person</h2>
+<ol>
+  <li><strong>15 min</strong> — In Zoom? → <strong>Yes</strong>. Not in Zoom? → <strong>No</strong>.</li>
+  <li><strong>30 min</strong> — In Zoom? → <strong>Yes</strong>. Joined but left? → <strong>No</strong>. Never joined? → <strong>Absent</strong>.</li>
+</ol>
+
+<h2>What RM / sales should do</h2>
+<ol>
+  <li><strong>At 15 min</strong> — Filter CRM for <strong>No</strong>. Call them — they can still join before 30 min.</li>
+  <li><strong>At 30 min</strong> — Attendance is final:
+    <ul>
+      <li><strong>Yes</strong> = attended</li>
+      <li><strong>No</strong> = joined but dropped / left early</li>
+      <li><strong>Absent</strong> = never showed on Zoom</li>
+    </ul>
+  </li>
+  <li><strong>After Day 2 (30 min)</strong> — <strong>MC Completed</strong> is updated automatically for eligible leads.</li>
+</ol>
+
+<h2>Day 1 vs Day 2</h2>
+<table>
+  <tr><th>Session</th><th>Zoom topic (approx.)</th><th>CRM field updated</th></tr>
+  <tr><td><strong>Day 1</strong></td><td>BHAG and Breakthrough Actions</td><td>Day 1 Attendance</td></tr>
+  <tr><td><strong>Day 2</strong></td><td>Art of War, Shameless Pitching &amp; Negotiation</td><td>Day 2 Attendance + MC Completed</td></tr>
+</table>
+
+<h2>How the system works (logic only)</h2>
+
+<h3>At session start</h3>
+<ul>
+  <li>Zoom session begins.</li>
+  <li>The system starts tracking who joins, who is still in the room, and who has left.</li>
+  <li><strong>No CRM updates yet.</strong></li>
+</ul>
+
+<h3>At 15 minutes (first check)</h3>
+<p><strong>Step 1 — Individual updates</strong></p>
+<table>
+  <tr><th>Who</th><th>What CRM gets</th></tr>
+  <tr><td>Currently in Zoom</td><td><strong>Yes</strong></td></tr>
+  <tr><td>Joined earlier but left before 15 min</td><td><strong>No</strong> <em>(via batch sweep below)</em></td></tr>
+  <tr><td>Not in Zoom yet (paid batch lead)</td><td><strong>No</strong> <em>(via batch sweep below)</em></td></tr>
+</table>
+<p><strong>Step 2 — Batch sweep (all paid batch leads for that day)</strong></p>
+<ul>
+  <li>Any lead whose attendance is still <strong>blank</strong> → marked <strong>No</strong></li>
+  <li>This covers people who never joined and people who joined and left early</li>
+</ul>
+<p><strong>Guests not in CRM:</strong> If someone joined Zoom but their email is not in CRM, they are logged to an internal sheet for manual follow-up. CRM leads always get <strong>No</strong> or <strong>Yes</strong> — not left blank.</p>
+
+<h3>At 30 minutes (final check)</h3>
+<p><strong>Step 1 — Individual updates</strong></p>
+<table>
+  <tr><th>Who</th><th>What CRM gets</th></tr>
+  <tr><td>Currently in Zoom</td><td><strong>Yes</strong> <em>(can upgrade No → Yes for late joiners)</em></td></tr>
+  <tr><td>Joined at some point but left before 30 min</td><td><strong>No</strong> <em>(can downgrade Yes → No for dropouts)</em></td></tr>
+</table>
+<p><strong>Step 2 — Batch safety net (all paid batch leads for that day)</strong></p>
+<table>
+  <tr><th>Join history</th><th>Final value</th></tr>
+  <tr><td>In Zoom at 30 min</td><td><strong>Yes</strong></td></tr>
+  <tr><td>Joined Zoom at some point but not in room at 30 min</td><td><strong>No</strong></td></tr>
+  <tr><td>Never joined Zoom at all</td><td><strong>Absent</strong></td></tr>
+</table>
+<p>Also: <strong>No → Yes</strong> if they are in the room at 30 min (late joiner). <strong>No → Absent</strong> if they never joined Zoom at all.</p>
+<p><strong>Step 3 — Day 2 only:</strong> After the 30-minute check on Day 2, eligible leads are marked <strong>MC Completed</strong> in CRM.</p>
+
+<h3>Rules the system follows</h3>
+<table>
+  <tr><th>Rule</th><th>Behaviour</th></tr>
+  <tr><td>Already <strong>Yes</strong> at 30 min, still in room</td><td>Stays <strong>Yes</strong></td></tr>
+  <tr><td><strong>No</strong> at 15 min, joins and stays till 30 min</td><td>Upgraded to <strong>Yes</strong></td></tr>
+  <tr><td><strong>Yes</strong> at 15 min, leaves before 30 min</td><td>Downgraded to <strong>No</strong></td></tr>
+  <tr><td><strong>No</strong> at 15 min, never joins</td><td>Upgraded to <strong>Absent</strong> at 30 min</td></tr>
+  <tr><td>Paid batch lead after 30 min</td><td>Never left blank — always <strong>Yes</strong>, <strong>No</strong>, or <strong>Absent</strong></td></tr>
+</table>
+
+<h2>One-line summary</h2>
+<blockquote>
+  <strong>15 min:</strong> In room = Yes; not in room = No (call them).<br>
+  <strong>30 min:</strong> In room = Yes; joined but left = No; never joined = Absent.
+</blockquote>
+
+</body>
+</html>
