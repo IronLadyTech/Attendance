@@ -78,6 +78,7 @@ Same mapping as `mark_attendance_yes`.
 | batch_date | `${webhookTrigger.payload.batch_date}` |
 | check_type | `first` (literal) |
 | ever_joined_emails | *(leave empty)* |
+| present_emails | *(leave empty)* |
 
 ### mark_batch_attendance_checkpoint (final_check)
 
@@ -88,6 +89,7 @@ Same mapping as `mark_attendance_yes`.
 | batch_date | `${webhookTrigger.payload.batch_date}` |
 | check_type | `final` (literal) |
 | ever_joined_emails | `${webhookTrigger.payload.ever_joined_emails}` |
+| present_emails | `${webhookTrigger.payload.present_emails}` |
 
 ### mark_mc_completed (Day 2 only)
 

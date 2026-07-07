@@ -205,6 +205,16 @@ def _ever_joined_email_csv(ever_joined: dict) -> str:
     return ",".join(emails)
 
 
+def _roster_email_csv(roster: dict) -> str:
+    """Emails in the meeting room at this checkpoint (T+30 present list)."""
+    emails: list[str] = []
+    for info in roster.values():
+        e = (info.get("email") or "").strip().lower()
+        if e:
+            emails.append(e)
+    return ",".join(emails)
+
+
 def _mc_sweep(meeting_id: str, sweep: int) -> None:
     with _mc_lock:
         state = _mc_meetings.get(meeting_id)
@@ -257,6 +267,7 @@ def _mc_sweep(meeting_id: str, sweep: int) -> None:
     payload["event"] = event
     if sweep == 2:
         payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
+        payload["present_emails"] = _roster_email_csv(roster)
     _post_to_zoho(forward_url, payload, f"mc-sweep{sweep}")
 
 

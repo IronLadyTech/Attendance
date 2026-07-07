@@ -99,7 +99,7 @@ AND
 
 **Actions (in order — same branch, chained):**
 
-1. `mark_batch_attendance_checkpoint` — `check_type` = `final`, `ever_joined_emails` = `${webhookTrigger.payload.ever_joined_emails}`
+1. `mark_batch_attendance_checkpoint` — `check_type` = `final`, `ever_joined_emails` = `${webhookTrigger.payload.ever_joined_emails}`, `present_emails` = `${webhookTrigger.payload.present_emails}`
 2. `mark_mc_completed` — `start_time` = `${webhookTrigger.payload.start_time}`
 
 ---
@@ -159,7 +159,7 @@ T+30    mark_yes (each in room — upgrades No → Yes)
 |----------|----------------|
 | mark_attendance_yes | email, name, meeting_topic, batch_date, session_date |
 | mark_attendance_lookup | email, name, meeting_topic, batch_date, session_date |
-| mark_batch_attendance_checkpoint | start_time, meeting_topic, batch_date, check_type, ever_joined_emails (final only) |
+| mark_batch_attendance_checkpoint | start_time, meeting_topic, batch_date, check_type, ever_joined_emails, present_emails (final only) |
 | mark_mc_completed | start_time |
 
 All map from `${webhookTrigger.payload.<field>}` except `check_type` (literal `first` or `final`).
