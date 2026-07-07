@@ -1,16 +1,23 @@
-// Zoho Flow custom function — 100BM batch checkpoint audit (no CRM writes)
-// Signature: void mark_100bm_batch_attendance_checkpoint(string start_time, string meeting_topic, string session_date, string check_type)
-//
-// 100BM policy: only mark FT_attendance = Yes for attendees present at checkpoint.
-// No / Absent are NOT written — FT_attendance and FT_attended_date stay blank/untouched.
-// This function logs eligible-lead counts for monitoring only.
+// Zoho Flow custom function — 100BM batch checkpoint sweep (mirrors MC mark_batch_attendance_checkpoint)
+// Signature: void mark_100bm_batch_attendance_checkpoint(string start_time, string meeting_topic, string session_date, string check_type, string ever_joined_emails, string present_emails)
+//   check_type = "first"  → T+15: blank → No (sales calls)
+//   check_type = "final"  → T+30 safety: blank + in room → Yes; blank + never joined → Absent; dropout → No
+// Eligibility: FT_Invite_Date matches session_date (no Payment_Status filter)
+// FT_attended_date is set whenever FT_attendance becomes Yes.
 // Connection: zoho_flow_to_zoho_crm
 //
-// Flow mapping (optional — audit log only):
-//   attendance.first_check  → check_type = first
-//   attendance.final_check  → check_type = final
+// Flow mapping (attendance.first_check branch):
+//   start_time    = ${webhookTrigger.payload.start_time}
+//   meeting_topic = ${webhookTrigger.payload.meeting_topic}
+//   session_date  = ${webhookTrigger.payload.session_date}
+//   check_type    = first
+//
+// Flow mapping (attendance.final_check branch):
+//   check_type         = final
+//   ever_joined_emails = ${webhookTrigger.payload.ever_joined_emails}
+//   present_emails     = ${webhookTrigger.payload.present_emails}
 
-void mark_100bm_batch_attendance_checkpoint(string start_time, string meeting_topic, string session_date, string check_type)
+void mark_100bm_batch_attendance_checkpoint(string start_time, string meeting_topic, string session_date, string check_type, string ever_joined_emails, string present_emails)
 {
 if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
 {
@@ -43,25 +50,32 @@ if(invite_date == null || invite_date.trim() == "" || invite_date == "null")
 	invite_date = start_time.substring(0,10);
 }
 invite_ddMMyyyy = invite_date.subString(8,10) + "-" + invite_date.subString(5,7) + "-" + invite_date.subString(0,4);
-info "100BM checkpoint audit: type=" + check_type + " invite_date=" + invite_date;
+info "100BM checkpoint: type=" + check_type + " invite_date=" + invite_date;
+// Eligibility: FT_Invite_Date = session date (no Payment_Status filter). Search by date then
+// verify in-memory. 10 pages x 200 keeps the function under the 30s limit.
+searchCriteria = "(FT_Invite_Date:equals:" + invite_date + ")";
 allLeads = List();
 pageNums = {1,2,3,4,5,6,7,8,9,10};
 for each pageNum in pageNums
 {
-	pageLeads = zoho.crm.searchRecords("Leads","(FT_Invite_Date:equals:" + invite_date + ")",pageNum,200);
-	if(pageLeads != null && pageLeads.size() > 0)
+	pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
+	if(pageLeads != null && pageLeads.size() >= 1)
 	{
 		allLeads.addAll(pageLeads);
+		if(pageLeads.size() < 200)
+		{
+			break;
+		}
 	}
 	else
 	{
 		break;
 	}
 }
+info "100BM leads fetched: " + allLeads.size();
+updateList = List();
+skippedCount = 0;
 matchedCount = 0;
-yesCount = 0;
-blankCount = 0;
-otherCount = 0;
 for each lead in allLeads
 {
 	leadInvite = lead.get("FT_Invite_Date");
@@ -78,22 +92,165 @@ for each lead in allLeads
 		if(dateMatch)
 		{
 			matchedCount = matchedCount + 1;
+			leadId = lead.get("id");
 			ftAtt = lead.get("FT_attendance");
+			recMap = Map();
+			recMap.put("id",leadId);
+			needsUpdate = false;
 			ftBlank = ftAtt == null || ftAtt == "-None-" || ftAtt.toString().trim() == "" || ftAtt.toString().trim() == "null";
-			if(ftBlank)
+			if(check_type == "first")
 			{
-				blankCount = blankCount + 1;
-			}
-			else if(ftAtt.toString() == "Yes")
-			{
-				yesCount = yesCount + 1;
+				if(ftBlank)
+				{
+					recMap.put("FT_attendance","No");
+					needsUpdate = true;
+				}
 			}
 			else
 			{
-				otherCount = otherCount + 1;
+				// T+30 safety net — no blanks left on batch:
+				//   in room at T+30 (present_emails) → Yes + FT_attended_date
+				//   joined but left (ever_joined, not present) → No
+				//   never joined → Absent
+				inEverJoined = false;
+				inPresent = false;
+				leadEmail = lead.get("Email");
+				if(leadEmail != null && leadEmail.trim() != "" && leadEmail != "null")
+				{
+					emailL = leadEmail.toLowerCase().trim();
+					if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+					{
+						peCsv = "," + present_emails.toLowerCase() + ",";
+						if(peCsv.contains("," + emailL + ","))
+						{
+							inPresent = true;
+						}
+					}
+					if(ever_joined_emails != null && ever_joined_emails.trim() != "" && ever_joined_emails != "null")
+					{
+						ejCsv = "," + ever_joined_emails.toLowerCase() + ",";
+						if(ejCsv.contains("," + emailL + ","))
+						{
+							inEverJoined = true;
+						}
+					}
+				}
+				if(ftBlank)
+				{
+					if(inPresent)
+					{
+						recMap.put("FT_attendance","Yes");
+						recMap.put("FT_attended_date",invite_date);
+					}
+					else if(inEverJoined)
+					{
+						recMap.put("FT_attendance","No");
+					}
+					else
+					{
+						recMap.put("FT_attendance","Absent");
+					}
+					needsUpdate = true;
+				}
+				else if(ftAtt.toString() == "Yes")
+				{
+					// already attended — skip
+				}
+				else if(ftAtt.toString() == "No")
+				{
+					if(inPresent)
+					{
+						recMap.put("FT_attendance","Yes");
+						recMap.put("FT_attended_date",invite_date);
+						needsUpdate = true;
+					}
+					else if(!inEverJoined)
+					{
+						recMap.put("FT_attendance","Absent");
+						needsUpdate = true;
+					}
+				}
+			}
+			if(needsUpdate)
+			{
+				updateList.add(recMap);
+			}
+			else
+			{
+				skippedCount = skippedCount + 1;
 			}
 		}
 	}
 }
-info "100BM checkpoint audit: type=" + check_type + " eligible=" + matchedCount + " yes=" + yesCount + " blank=" + blankCount + " other=" + otherCount + " (no CRM updates — blank left untouched)";
+// bulkUpdate allows max 100 records per call — send in groups of 100
+updatedCount = 0;
+failedCount = 0;
+chunkNum = 0;
+chunk = List();
+for each recMap in updateList
+{
+	chunk.add(recMap);
+	if(chunk.size() == 100)
+	{
+		chunkNum = chunkNum + 1;
+		bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+		chunkOk = 0;
+		chunkFail = 0;
+		respData = bulkResp.get("data");
+		if(respData != null)
+		{
+			for each row in respData
+			{
+				if(row.get("status") == "success")
+				{
+					chunkOk = chunkOk + 1;
+				}
+				else
+				{
+					chunkFail = chunkFail + 1;
+				}
+			}
+		}
+		updatedCount = updatedCount + chunkOk;
+		failedCount = failedCount + chunkFail;
+		info "100BM bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail + " resp=" + bulkResp.toString();
+		chunk = List();
+	}
+}
+if(chunk.size() > 0)
+{
+	chunkNum = chunkNum + 1;
+	bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+	chunkOk = 0;
+	chunkFail = 0;
+	respData = bulkResp.get("data");
+	if(respData != null)
+	{
+		for each row in respData
+		{
+			if(row.get("status") == "success")
+			{
+				chunkOk = chunkOk + 1;
+			}
+			else
+			{
+				chunkFail = chunkFail + 1;
+			}
+		}
+	}
+	updatedCount = updatedCount + chunkOk;
+	failedCount = failedCount + chunkFail;
+	info "100BM bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail + " resp=" + bulkResp.toString();
+}
+info "100BM checkpoint: type=" + check_type + " matched=" + matchedCount + " updated=" + updatedCount + " failed=" + failedCount + " skipped=" + skippedCount + " chunks=" + chunkNum;
+if(failedCount > 0)
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com"
+		subject :"100BM Attendance checkpoint - " + failedCount + " updates FAILED (" + invite_date + ")"
+		message :"<p>100BM batch attendance update had failures.</p><p>Type: " + check_type + "<br>Invite date: " + invite_date + "<br>Matched: " + matchedCount + "<br>Updated OK: " + updatedCount + "<br><b>Failed: " + failedCount + "</b><br>Chunks: " + chunkNum + "</p><p>Check the function log for failed record details.</p>"
+	]
+}
 }

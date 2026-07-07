@@ -67,22 +67,16 @@ if(batch_start_date == null || batch_start_date.trim() == "" || batch_start_date
 }
 batch_ddMMyyyy = batch_start_date.subString(8,10) + "-" + batch_start_date.subString(5,7) + "-" + batch_start_date.subString(0,4);
 info "checkpoint: type=" + check_type + " session=" + sessionDay + " batch=" + batch_start_date;
-// Scope search to the batch date (±1 day buffer for timezone edges) so only this batch's
-// leads are fetched — avoids the all-time "Completed" pool outgrowing the page cap and keeps
-// the decision loop small (≈ batch size, not every paid lead ever).
-batchDt = batch_start_date.toTime("yyyy-MM-dd");
-rangeStartDate = (batchDt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
-rangeEndDate = (batchDt.toLong() + 86400000).toTime().toString("yyyy-MM-dd");
-rangeStart = rangeStartDate + "T00:00:00+05:30";
-rangeEnd = rangeEndDate + "T23:59:59+05:30";
-// Payment_Status (UI: MC Payment Status) = Completed — NO Lead_Status filter
-searchCriteria = "(Payment_Status:equals:Completed)and(MC_Start_Date_Time:between:" + rangeStart + "," + rangeEnd + ")";
+// Payment_Status (UI: MC Payment Status) = Completed. Date filtering is done in-memory below
+// (searchRecords criteria on the MC_Start_Date_Time datetime field is unreliable). 10 pages x 200
+// = up to 2000 Completed leads; keep pages small so the function stays under the 30s limit.
+searchCriteria = "(Payment_Status:equals:Completed)";
 allLeads = List();
 pageNums = {1,2,3,4,5,6,7,8,9,10};
 for each pageNum in pageNums
 {
 	pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
-	if(pageLeads != null && pageLeads.size() > 0)
+	if(pageLeads != null && pageLeads.size() >= 1)
 	{
 		allLeads.addAll(pageLeads);
 		if(pageLeads.size() < 200)
@@ -95,7 +89,7 @@ for each pageNum in pageNums
 		break;
 	}
 }
-info "Total CRM leads fetched (batch-scoped): " + allLeads.size();
+info "Total CRM leads fetched: " + allLeads.size();
 updateList = List();
 skippedCount = 0;
 matchedCount = 0;
@@ -294,7 +288,6 @@ updatedCount = 0;
 failedCount = 0;
 chunkNum = 0;
 chunk = List();
-chunk.clear();
 for each recMap in updateList
 {
 	chunk.add(recMap);
@@ -323,7 +316,6 @@ for each recMap in updateList
 		failedCount = failedCount + chunkFail;
 		info "bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail + " resp=" + bulkResp.toString();
 		chunk = List();
-		chunk.clear();
 	}
 }
 if(chunk.size() > 0)

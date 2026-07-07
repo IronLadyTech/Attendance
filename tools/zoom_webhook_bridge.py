@@ -9,11 +9,12 @@ MC route (POST /):
   - T+30 → mark_yes for everyone in roster + attendance.final_check to Zoho
   - meeting.ended (MC topic) → meeting.ended to Zoho (MC Completed only; no attendance)
 
-100BM route (POST /100bm) — same T+15 / T+30 checkpoint model:
+100BM route (POST /100bm) — same T+15 / T+30 checkpoint model as MC:
   - meeting.started (100BM topic) → schedule T+15 and T+30 checkpoint sweeps
   - meeting.participant_joined / left → maintain in-meeting roster
-  - T+15 → mark_yes + attendance.first_check to Zoho (100BM Flow)
-  - T+30 → mark_yes + attendance.final_check to Zoho (100BM Flow)
+  - T+15 → mark_yes (in room) + lookup (joined-left) + attendance.first_check
+  - T+30 → mark_yes (in room) + mark_no (joined-left dropout) + attendance.final_check
+           (final_check carries present_emails + ever_joined_emails for batch safety net)
 
 Environment variables required:
   ZOOM_WEBHOOK_SECRET_TOKEN, ZOHO_WEBHOOK_FORWARD_URL
@@ -471,6 +472,18 @@ def _100bm_mark_yes(forward_url: str, state: dict, email: str, name: str, join_t
     _post_to_zoho(forward_url, payload, "100bm-yes")
 
 
+def _100bm_mark_no(forward_url: str, state: dict, email: str, name: str, join_time: str) -> None:
+    """T+30 only: joined at some point but not in room at final checkpoint → No (Yes→No allowed)."""
+    payload = _100bm_base_payload(state)
+    payload.update({
+        "event": "attendance.mark_no",
+        "participant_email": email,
+        "participant_name": name,
+        "join_time": join_time,
+    })
+    _post_to_zoho(forward_url, payload, "100bm-no")
+
+
 def _100bm_lookup_participant(forward_url: str, state: dict, email: str, name: str, join_time: str) -> None:
     payload = _100bm_base_payload(state)
     payload.update({
@@ -515,9 +528,24 @@ def _100bm_sweep(meeting_id: str, sweep: int) -> None:
                 continue
             _100bm_lookup_participant(forward_url, state, email, name, info.get("join_time", ""))
 
+    # T+30 only: joined earlier but not in room now → No (downgrades Yes from T+15 if they left)
+    if sweep == 2:
+        roster_keys = set(roster.keys())
+        for rkey, info in ever_joined.items():
+            if rkey in roster_keys:
+                continue
+            email = info.get("email", "")
+            name = info.get("name", "")
+            if not email and not name:
+                continue
+            _100bm_mark_no(forward_url, state, email, name, info.get("join_time", ""))
+
     event = "attendance.first_check" if sweep == 1 else "attendance.final_check"
     payload = _100bm_base_payload(state)
     payload["event"] = event
+    if sweep == 2:
+        payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
+        payload["present_emails"] = _roster_email_csv(roster)
     _post_to_zoho(forward_url, payload, f"100bm-sweep{sweep}")
 
 
