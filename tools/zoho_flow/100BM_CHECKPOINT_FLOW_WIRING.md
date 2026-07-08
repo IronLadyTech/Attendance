@@ -32,7 +32,7 @@ Check conditions top to bottom; first match wins.
 | UI label | API name | Written |
 |----------|----------|---------|
 | FT Attendance | `FT_attendance` | Yes / No / Absent |
-| FT Attended Date | `FT_attended_date` | Set to session date whenever `FT_attendance` becomes **Yes** |
+| FT Attended Date | `FT_attended_date` | Set on **Yes** only; cleared on **No** / **Absent** |
 | FT Invite Date | `FT_Invite_Date` | Eligibility filter (= session date); not updated |
 
 ## Eligibility

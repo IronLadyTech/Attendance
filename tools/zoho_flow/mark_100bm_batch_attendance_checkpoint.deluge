@@ -4,7 +4,7 @@
 //   check_type = "final"  → T+30 safety: blank + in room → Yes; blank + never joined → Absent; dropout → No
 //   check_type = "hour"   → T+60 late opportunity: in room + No/Absent → Yes; not in room → unchanged
 // Eligibility: FT_Invite_Date matches session_date (no Payment_Status filter)
-// FT_attended_date is set whenever FT_attendance becomes Yes.
+// FT_attended_date is set only when FT_attendance becomes Yes; cleared on No/Absent.
 // Connection: zoho_flow_to_zoho_crm
 //
 // Flow mapping (attendance.first_check branch):
@@ -182,10 +182,12 @@ for each lead in allLeads
 					else if(inEverJoined)
 					{
 						recMap.put("FT_attendance","No");
+						recMap.put("FT_attended_date",null);
 					}
 					else
 					{
 						recMap.put("FT_attendance","Absent");
+						recMap.put("FT_attended_date",null);
 					}
 					needsUpdate = true;
 				}
@@ -204,6 +206,7 @@ for each lead in allLeads
 					else if(!inEverJoined)
 					{
 						recMap.put("FT_attendance","Absent");
+						recMap.put("FT_attended_date",null);
 						needsUpdate = true;
 					}
 				}

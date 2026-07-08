@@ -121,7 +121,7 @@ Same signature and mapping as `mark_batch_attendance_checkpoint`. Map ALL six pa
 | ever_joined_emails | `${webhookTrigger.payload.ever_joined_emails}` |
 | present_emails | `${webhookTrigger.payload.present_emails}` |
 
-Emails the report to `ironladytech@gmail.com` (change `reportTo` in the function to adjust). Per-participant Yes/No/Absent + reason, counts, and a guests section for joiners with no CRM match.
+Emails the report to `ironladytech@gmail.com`, `yaswanthgrandhi2580@gmail.com`, and `brunda@iamironlady.com` (change `reportTo` in the function to adjust). Per-participant Yes/No/Absent + reason, counts, and a guests section for joiners with no CRM match.
 
 ### mark_mc_completed (Day 2 only)
 

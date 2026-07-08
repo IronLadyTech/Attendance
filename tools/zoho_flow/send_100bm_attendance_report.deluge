@@ -20,7 +20,7 @@
 
 void send_100bm_attendance_report(string start_time, string meeting_topic, string session_date, string check_type, string ever_joined_emails, string present_emails)
 {
-reportTo = "ironladytech@gmail.com";
+reportTo = "ironladytech@gmail.com,yaswanthgrandhi2580@gmail.com,brunda@iamironlady.com";
 if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
 {
 	topicL = meeting_topic.toLowerCase();

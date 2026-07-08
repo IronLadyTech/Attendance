@@ -128,6 +128,7 @@ if(existing == "No")
 }
 update_map = Map();
 update_map.put("FT_attendance","No");
+update_map.put("FT_attended_date",null);
 zoho.crm.updateRecord("Leads",lead_id,update_map);
-info "100BM MARKED NO: lead=" + lead_id + " FT_attendance=No was=" + existing;
+info "100BM MARKED NO: lead=" + lead_id + " FT_attendance=No FT_attended_date=cleared was=" + existing;
 }
