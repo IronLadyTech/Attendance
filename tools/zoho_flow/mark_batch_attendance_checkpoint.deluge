@@ -2,6 +2,7 @@
 // Signature: void mark_batch_attendance_checkpoint(string start_time, string meeting_topic, string batch_date, string check_type, string ever_joined_emails, string present_emails)
 //   check_type = "first"  → T+15: blank → No (sales calls)
 //   check_type = "final"  → T+30 safety: blank + in room → Yes; blank + never joined → Absent; dropout → No
+//   check_type = "hour"   → T+60 late opportunity: in room + No/Absent → Yes; not in room → unchanged
 // Connection: zoho_flow_to_zoho_crm
 //
 // Flow mapping (attendance.first_check branch):
@@ -41,7 +42,7 @@ if(check_type == null || check_type.trim() == "")
 	return;
 }
 check_type = check_type.trim().toLowerCase();
-if(check_type != "first" && check_type != "final")
+if(check_type != "first" && check_type != "final" && check_type != "hour")
 {
 	info "checkpoint: invalid check_type=" + check_type;
 	return;
@@ -138,6 +139,64 @@ for each lead in allLeads
 					{
 						recMap.put("Day_2_Attendance","No");
 						needsUpdate = true;
+					}
+				}
+			}
+			else if(check_type == "hour")
+			{
+				// T+60 — upgrade only: in room at 1hr + No/Absent → Yes; already Yes or not present → skip
+				inPresent = false;
+				leadEmail = lead.get("Email");
+				if(leadEmail != null && leadEmail.trim() != "" && leadEmail != "null")
+				{
+					emailL = leadEmail.toLowerCase().trim();
+					if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+					{
+						peCsv = "," + present_emails.toLowerCase() + ",";
+						if(peCsv.contains("," + emailL + ","))
+						{
+							inPresent = true;
+						}
+					}
+				}
+				if(sessionDay == "Day 1")
+				{
+					if(inPresent)
+					{
+						cur1 = "";
+						if(day1 != null)
+						{
+							cur1 = day1.toString().trim();
+						}
+						if(cur1 == "Yes")
+						{
+							// unchanged
+						}
+						else if(cur1 == "No" || cur1 == "Absent" || day1Blank)
+						{
+							recMap.put("Day_1_Attendance","Yes");
+							needsUpdate = true;
+						}
+					}
+				}
+				else
+				{
+					if(inPresent)
+					{
+						cur2 = "";
+						if(day2 != null)
+						{
+							cur2 = day2.toString().trim();
+						}
+						if(cur2 == "Yes")
+						{
+							// unchanged
+						}
+						else if(cur2 == "No" || cur2 == "Absent" || day2Blank)
+						{
+							recMap.put("Day_2_Attendance","Yes");
+							needsUpdate = true;
+						}
 					}
 				}
 			}

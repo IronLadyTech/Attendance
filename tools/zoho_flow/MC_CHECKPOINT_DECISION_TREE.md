@@ -129,12 +129,13 @@ No action. Events that fall through:
 
 | When | `event` value |
 |------|----------------|
-| In meeting at T+15 or T+30 | `attendance.mark_yes` (one per person) |
+| In meeting at T+15, T+30, or T+60 | `attendance.mark_yes` (one per person) |
 | Joined but left before T+15 | `attendance.lookup` (one per person) |
 | Joined but left before T+30 (dropped) | `attendance.mark_no` → **No** |
 | Never joined Zoom (CRM lead) | T+15 batch → **No**; T+30 batch → **Absent** |
 | T+15 sweep done | `attendance.first_check` |
 | T+30 sweep done | `attendance.final_check` |
+| T+60 sweep done | `attendance.hour_check` (upgrade No/Absent → Yes if in room) |
 | Meeting ends | `meeting.ended` (optional; no attendance action) |
 
 ---
@@ -147,8 +148,11 @@ T+15    mark_yes (each in room)
         lookup (each who joined then left)
         first_check → batch blank → No
 T+30    mark_yes (each in room — upgrades No → Yes)
-        final_check Day 1 → batch blank → No
-        final_check Day 2 → batch blank → No → mark_mc_completed
+        mark_no (dropouts)
+        final_check → safety net Yes/No/Absent
+T+60    mark_yes (each in room)
+        hour_check → in room + No/Absent → Yes; not in room → unchanged
+        final_check Day 2 (after hour) → mark_mc_completed only if still on Day 2 final branch at T+30
 ```
 
 ---
@@ -159,7 +163,8 @@ T+30    mark_yes (each in room — upgrades No → Yes)
 |----------|----------------|
 | mark_attendance_yes | email, name, meeting_topic, batch_date, session_date |
 | mark_attendance_lookup | email, name, meeting_topic, batch_date, session_date |
-| mark_batch_attendance_checkpoint | start_time, meeting_topic, batch_date, check_type, ever_joined_emails, present_emails (final only) |
+| mark_batch_attendance_checkpoint | start_time, meeting_topic, batch_date, check_type (`first` / `final` / `hour`), ever_joined_emails, present_emails |
+| send_attendance_report | same as checkpoint |
 | mark_mc_completed | start_time |
 
-All map from `${webhookTrigger.payload.<field>}` except `check_type` (literal `first` or `final`).
+All map from `${webhookTrigger.payload.<field>}` except `check_type` (literal `first`, `final`, or `hour`).

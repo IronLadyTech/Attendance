@@ -7,6 +7,7 @@ MC route (POST /):
   - meeting.participant_joined / left → maintain in-meeting roster (no per-person timer)
   - T+15 → mark_yes for everyone in roster + attendance.first_check to Zoho
   - T+30 → mark_yes for everyone in roster + attendance.final_check to Zoho
+  - T+60 → mark_yes for everyone in roster + attendance.hour_check (late Yes upgrade only)
   - meeting.ended (MC topic) → meeting.ended to Zoho (MC Completed only; no attendance)
 
 100BM route (POST /100bm) — same T+15 / T+30 checkpoint model as MC:
@@ -15,6 +16,7 @@ MC route (POST /):
   - T+15 → mark_yes (in room) + lookup (joined-left) + attendance.first_check
   - T+30 → mark_yes (in room) + mark_no (joined-left dropout) + attendance.final_check
            (final_check carries present_emails + ever_joined_emails for batch safety net)
+  - T+60 → mark_yes (in room) + attendance.hour_check (upgrade No/Absent → Yes only)
 
 Environment variables required:
   ZOOM_WEBHOOK_SECRET_TOKEN, ZOHO_WEBHOOK_FORWARD_URL
@@ -23,8 +25,10 @@ Optional:
   ZOOM_WEBHOOK_SECRET_TOKEN_100BM, ZOHO_WEBHOOK_FORWARD_URL_100BM
   MC_CHECKPOINT_1_SECONDS (default 900 = 15 min)
   MC_CHECKPOINT_2_SECONDS (default 1800 = 30 min)
+  MC_CHECKPOINT_3_SECONDS (default 3600 = 60 min)
   BM100_CHECKPOINT_1_SECONDS (default 900 = 15 min, 100BM route)
   BM100_CHECKPOINT_2_SECONDS (default 1800 = 30 min, 100BM route)
+  BM100_CHECKPOINT_3_SECONDS (default 3600 = 60 min, 100BM route)
 """
 from __future__ import annotations
 
@@ -47,10 +51,12 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # MC checkpoint delays from actual Zoom meeting start
 _MC_CHECKPOINT_1 = int(os.environ.get("MC_CHECKPOINT_1_SECONDS", "900"))   # T+15
 _MC_CHECKPOINT_2 = int(os.environ.get("MC_CHECKPOINT_2_SECONDS", "1800"))  # T+30
+_MC_CHECKPOINT_3 = int(os.environ.get("MC_CHECKPOINT_3_SECONDS", "3600"))  # T+60
 
 # 100BM checkpoint delays (same defaults as MC)
 _BM100_CHECKPOINT_1 = int(os.environ.get("BM100_CHECKPOINT_1_SECONDS", "900"))   # T+15
 _BM100_CHECKPOINT_2 = int(os.environ.get("BM100_CHECKPOINT_2_SECONDS", "1800"))  # T+30
+_BM100_CHECKPOINT_3 = int(os.environ.get("BM100_CHECKPOINT_3_SECONDS", "3600"))  # T+60
 
 _DAY1_KEYWORDS = ["bhag", "breakthrough actions"]
 _DAY2_KEYWORDS = ["art of war", "shameless pitching"]
@@ -216,6 +222,14 @@ def _roster_email_csv(roster: dict) -> str:
     return ",".join(emails)
 
 
+def _checkpoint_event(sweep: int) -> str:
+    if sweep == 1:
+        return "attendance.first_check"
+    if sweep == 2:
+        return "attendance.final_check"
+    return "attendance.hour_check"
+
+
 def _mc_sweep(meeting_id: str, sweep: int) -> None:
     with _mc_lock:
         state = _mc_meetings.get(meeting_id)
@@ -263,11 +277,11 @@ def _mc_sweep(meeting_id: str, sweep: int) -> None:
                 continue
             _mc_mark_no(forward_url, state, email, name, info.get("join_time", ""))
 
-    event = "attendance.first_check" if sweep == 1 else "attendance.final_check"
+    # T+60: no lookup, no mark_no — only mark_yes (above) + hour_check batch upgrade
+
+    event = _checkpoint_event(sweep)
     payload = _mc_base_payload(state)
     payload["event"] = event
-    # Send join lists on BOTH checks so the attendance report (first + final) can compute
-    # Yes/No/Absent and detect guests. present = in room at this checkpoint.
     payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
     payload["present_emails"] = _roster_email_csv(roster)
     _post_to_zoho(forward_url, payload, f"mc-sweep{sweep}")
@@ -282,13 +296,14 @@ def _mc_schedule_checkpoints(meeting_id: str, state: dict) -> None:
     _mc_cancel_timers(state)
     t1 = threading.Timer(_MC_CHECKPOINT_1, _mc_sweep, args=[meeting_id, 1])
     t2 = threading.Timer(_MC_CHECKPOINT_2, _mc_sweep, args=[meeting_id, 2])
-    for t in (t1, t2):
+    t3 = threading.Timer(_MC_CHECKPOINT_3, _mc_sweep, args=[meeting_id, 3])
+    for t in (t1, t2, t3):
         t.daemon = True
         t.start()
-    state["timers"] = [t1, t2]
+    state["timers"] = [t1, t2, t3]
     sys.stderr.write(
-        f"[started] Checkpoints scheduled: T+{_MC_CHECKPOINT_1}s and T+{_MC_CHECKPOINT_2}s "
-        f"meeting={meeting_id}\n"
+        f"[started] Checkpoints scheduled: T+{_MC_CHECKPOINT_1}s, T+{_MC_CHECKPOINT_2}s, "
+        f"T+{_MC_CHECKPOINT_3}s meeting={meeting_id}\n"
     )
 
 
@@ -541,12 +556,11 @@ def _100bm_sweep(meeting_id: str, sweep: int) -> None:
                 continue
             _100bm_mark_no(forward_url, state, email, name, info.get("join_time", ""))
 
-    event = "attendance.first_check" if sweep == 1 else "attendance.final_check"
+    event = _checkpoint_event(sweep)
     payload = _100bm_base_payload(state)
     payload["event"] = event
-    if sweep == 2:
-        payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
-        payload["present_emails"] = _roster_email_csv(roster)
+    payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
+    payload["present_emails"] = _roster_email_csv(roster)
     _post_to_zoho(forward_url, payload, f"100bm-sweep{sweep}")
 
 
@@ -559,13 +573,14 @@ def _100bm_schedule_checkpoints(meeting_id: str, state: dict) -> None:
     _100bm_cancel_timers(state)
     t1 = threading.Timer(_BM100_CHECKPOINT_1, _100bm_sweep, args=[meeting_id, 1])
     t2 = threading.Timer(_BM100_CHECKPOINT_2, _100bm_sweep, args=[meeting_id, 2])
-    for t in (t1, t2):
+    t3 = threading.Timer(_BM100_CHECKPOINT_3, _100bm_sweep, args=[meeting_id, 3])
+    for t in (t1, t2, t3):
         t.daemon = True
         t.start()
-    state["timers"] = [t1, t2]
+    state["timers"] = [t1, t2, t3]
     sys.stderr.write(
-        f"[100bm/started] Checkpoints scheduled: T+{_BM100_CHECKPOINT_1}s and T+{_BM100_CHECKPOINT_2}s "
-        f"meeting={meeting_id}\n"
+        f"[100bm/started] Checkpoints scheduled: T+{_BM100_CHECKPOINT_1}s, T+{_BM100_CHECKPOINT_2}s, "
+        f"T+{_BM100_CHECKPOINT_3}s meeting={meeting_id}\n"
     )
 
 
@@ -804,8 +819,10 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_
                 "service": "zoom_webhook_bridge",
                 "mc_checkpoint_1_seconds": _MC_CHECKPOINT_1,
                 "mc_checkpoint_2_seconds": _MC_CHECKPOINT_2,
+                "mc_checkpoint_3_seconds": _MC_CHECKPOINT_3,
                 "100bm_checkpoint_1_seconds": _BM100_CHECKPOINT_1,
                 "100bm_checkpoint_2_seconds": _BM100_CHECKPOINT_2,
+                "100bm_checkpoint_3_seconds": _BM100_CHECKPOINT_3,
                 "active_mc_meetings": active_mc,
                 "active_100bm_meetings": active_100bm,
                 "route_100bm": bool(self._secret_100bm),
@@ -843,15 +860,15 @@ def main() -> None:
     route_100bm = "/100bm enabled" if secret_100bm else "/100bm disabled"
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
-        f"MC checkpoints     : T+{_MC_CHECKPOINT_1}s (first), T+{_MC_CHECKPOINT_2}s (final)\n"
-        f"100BM checkpoints: T+{_BM100_CHECKPOINT_1}s (first), T+{_BM100_CHECKPOINT_2}s (final)\n"
+        f"MC checkpoints     : T+{_MC_CHECKPOINT_1}s (first), T+{_MC_CHECKPOINT_2}s (final), T+{_MC_CHECKPOINT_3}s (hour)\n"
+        f"100BM checkpoints: T+{_BM100_CHECKPOINT_1}s (first), T+{_BM100_CHECKPOINT_2}s (final), T+{_BM100_CHECKPOINT_3}s (hour)\n"
         f"Day 1 keywords     : {_DAY1_KEYWORDS}\n"
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
         f"100BM keywords     : {_100BM_KEYWORDS}\n"
         f"100BM route        : {route_100bm}\n"
         f"Forward URL        : {forward}\n"
-        "MC /               : meeting.started → roster → T+15/T+30 sweeps\n"
-        "100BM /100bm       : meeting.started → roster → T+15/T+30 sweeps\n"
+        "MC /               : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
+        "100BM /100bm       : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
         "meeting.ended      : MC Completed trigger only (no attendance at end)",
         flush=True,
     )

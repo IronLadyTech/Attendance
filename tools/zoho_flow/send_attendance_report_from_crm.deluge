@@ -1,0 +1,154 @@
+// Zoho Flow / CRM custom function — emails an attendance report built from the CURRENT
+// attendance values stored in CRM (use for a session that has already finished).
+// Signature: void send_attendance_report_from_crm(string meeting_topic, string batch_date)
+// Connection: zoho_flow_to_zoho_crm
+//
+// Unlike send_attendance_report (which needs the live present/ever_joined lists from the bridge),
+// this reads Day_1_Attendance / Day_2_Attendance directly, so it can be run any time after a
+// session. Execute it manually with:
+//   meeting_topic = the Day 1 or Day 2 topic (decides which day's field is reported)
+//   batch_date    = batch start date (yyyy-MM-dd)
+
+void send_attendance_report_from_crm(string meeting_topic, string batch_date)
+{
+reportTo = "ironladytech@gmail.com";
+sessionDay = "";
+attField = "";
+if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
+{
+	topicL = meeting_topic.toLowerCase();
+	if(topicL.contains("bhag") || topicL.contains("breakthrough actions"))
+	{
+		sessionDay = "Day 1";
+		attField = "Day_1_Attendance";
+	}
+	else if(topicL.contains("art of war") || topicL.contains("shameless pitching"))
+	{
+		sessionDay = "Day 2";
+		attField = "Day_2_Attendance";
+	}
+}
+if(sessionDay == "")
+{
+	info "report-crm: unknown topic=" + meeting_topic;
+	return;
+}
+if(batch_date == null || batch_date.trim() == "" || batch_date == "null")
+{
+	info "report-crm: batch_date missing";
+	return;
+}
+batch_start_date = batch_date.trim();
+batch_ddMMyyyy = batch_start_date.subString(8,10) + "-" + batch_start_date.subString(5,7) + "-" + batch_start_date.subString(0,4);
+searchCriteria = "(Payment_Status:equals:Completed)";
+allLeads = List();
+pageNums = {1,2,3,4,5,6,7,8,9,10};
+for each pageNum in pageNums
+{
+	pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
+	if(pageLeads != null && pageLeads.size() >= 1)
+	{
+		allLeads.addAll(pageLeads);
+		if(pageLeads.size() < 200)
+		{
+			break;
+		}
+	}
+	else
+	{
+		break;
+	}
+}
+yesCount = 0;
+noCount = 0;
+absentCount = 0;
+blankCount = 0;
+matchedCount = 0;
+rows = "";
+for each lead in allLeads
+{
+	leadDate = lead.get("MC_Start_Date_Time");
+	if(leadDate != null)
+	{
+		dateYMD = leadDate.toString("yyyy-MM-dd");
+		dateDMY = leadDate.toString("dd-MM-yyyy");
+		rawDate = leadDate.toString();
+		if(dateYMD == batch_start_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_start_date) || rawDate.contains(batch_ddMMyyyy))
+		{
+			matchedCount = matchedCount + 1;
+			leadEmail = lead.get("Email");
+			leadName = lead.get("Full_Name");
+			if(leadName == null || leadName == "null")
+			{
+				leadName = "";
+			}
+			att = lead.get(attField);
+			status = "";
+			if(att == null || att == "-None-" || att.toString().trim() == "" || att.toString().trim() == "null")
+			{
+				status = "(blank)";
+			}
+			else
+			{
+				status = att.toString().trim();
+			}
+			reason = "";
+			rowColor = "#ffffff";
+			if(status == "Yes")
+			{
+				reason = "Present — in Zoom room at the 30-min check";
+				rowColor = "#e8f5e9";
+				yesCount = yesCount + 1;
+			}
+			else if(status == "No")
+			{
+				reason = "Joined but left before 30 min, or not in room at check";
+				rowColor = "#fff8e1";
+				noCount = noCount + 1;
+			}
+			else if(status == "Absent")
+			{
+				reason = "Never joined Zoom during the session";
+				rowColor = "#ffebee";
+				absentCount = absentCount + 1;
+			}
+			else
+			{
+				reason = "No attendance recorded — checkpoint may not have run";
+				rowColor = "#eceff1";
+				blankCount = blankCount + 1;
+			}
+			rows = rows + "<tr style='background:" + rowColor + ";'><td>" + matchedCount + "</td><td>" + leadEmail + "</td><td>" + leadName + "</td><td><b>" + status + "</b></td><td>" + reason + "</td></tr>";
+		}
+	}
+}
+countLine = "Yes: <b>" + yesCount + "</b> &nbsp;|&nbsp; No: <b>" + noCount + "</b> &nbsp;|&nbsp; Absent: <b>" + absentCount + "</b>";
+if(blankCount > 0)
+{
+	countLine = countLine + " &nbsp;|&nbsp; Blank: <b>" + blankCount + "</b>";
+}
+countLine = countLine + " &nbsp;|&nbsp; Total: <b>" + matchedCount + "</b>";
+html = "<div style='font-family:Segoe UI,Arial,sans-serif;color:#222;'>";
+html = html + "<h2>MC Attendance Report (from CRM) — " + sessionDay + "</h2>";
+html = html + "<p><b>" + sessionDay + "</b> &nbsp;|&nbsp; Batch: <b>" + batch_start_date + "</b> &nbsp;|&nbsp; Field: " + attField + "</p>";
+html = html + "<p style='font-size:15px;'>" + countLine + "</p>";
+html = html + "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;font-size:13px;'>";
+html = html + "<tr style='background:#f0f0f0;'><th>#</th><th>Email</th><th>Name</th><th>Status</th><th>Reason</th></tr>";
+html = html + rows;
+html = html + "</table>";
+html = html + "<h3>What the statuses mean</h3><ul>";
+html = html + "<li><b>Yes</b> — present in the room at the 30-minute check.</li>";
+html = html + "<li><b>No</b> — joined but left before 30 min (or was not in the room at the check).</li>";
+html = html + "<li><b>Absent</b> — never joined Zoom during the session.</li>";
+html = html + "<li><b>(blank)</b> — no value recorded; the checkpoint may not have run for this lead.</li>";
+html = html + "</ul><p style='color:#888;font-size:12px;'>Built from current CRM attendance values, not live Zoom data. Guests without a CRM record are not shown.</p></div>";
+subject = "MC Attendance (from CRM) — " + sessionDay + " " + batch_start_date + " (Yes " + yesCount + " / No " + noCount + " / Absent " + absentCount + ")";
+sendmail
+[
+	from :zoho.loginuserid
+	to :reportTo
+	subject :subject
+	message :html
+]
+info "report-crm sent: " + sessionDay + " batch=" + batch_start_date + " yes=" + yesCount + " no=" + noCount + " absent=" + absentCount + " blank=" + blankCount + " total=" + matchedCount;
+}

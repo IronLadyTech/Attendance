@@ -1,79 +1,58 @@
-// Zoho Flow custom function — emails a participant-wise attendance report.
-// Signature: void send_attendance_report(string start_time, string meeting_topic, string batch_date, string check_type, string ever_joined_emails, string present_emails)
+// Zoho Flow custom function — emails a participant-wise 100BM attendance report.
+// Signature: void send_100bm_attendance_report(string start_time, string meeting_topic, string session_date, string check_type, string ever_joined_emails, string present_emails)
 // Connection: zoho_flow_to_zoho_crm
 //
-// Wire as a SECOND action on the same branches as mark_batch_attendance_checkpoint:
-//   attendance.first_check → mark_batch_attendance_checkpoint (first) + send_attendance_report (first)
-//   attendance.final_check → mark_batch_attendance_checkpoint (final) + send_attendance_report (final)
+// Wire as a SECOND action on the same branches as mark_100bm_batch_attendance_checkpoint:
+//   attendance.first_check → mark_100bm_batch_attendance_checkpoint (first) + send_100bm_attendance_report (first)
+//   attendance.final_check → mark_100bm_batch_attendance_checkpoint (final) + send_100bm_attendance_report (final)
 //
 // Report contents:
 //   FIRST check  → per-lead Yes/No + reason, counts, guests (joined but no CRM match)
 //   FINAL check  → per-lead Yes/No/Absent + reason, counts, guests
 //
 // Status logic (email-based, same as attendance):
-//   inPresent (present_emails)      → in Zoom room at this checkpoint
+//   inPresent (present_emails)        → in Zoom room at this checkpoint
 //   inEverJoined (ever_joined_emails) → joined at some point during the session
 //   FIRST: present → Yes ; else No
 //   FINAL: present → Yes ; else ever_joined → No ; else Absent
+//
+// Eligibility: FT_Invite_Date matches session_date (no Payment_Status filter).
 
-void send_attendance_report(string start_time, string meeting_topic, string batch_date, string check_type, string ever_joined_emails, string present_emails)
+void send_100bm_attendance_report(string start_time, string meeting_topic, string session_date, string check_type, string ever_joined_emails, string present_emails)
 {
 reportTo = "ironladytech@gmail.com";
-sessionDay = "";
 if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
 {
 	topicL = meeting_topic.toLowerCase();
-	if(topicL.contains("bhag") || topicL.contains("breakthrough actions"))
+	if(!topicL.contains("orientation session") && !topicL.contains("fast track your leadership growth"))
 	{
-		sessionDay = "Day 1";
+		info "100BM report: unknown topic=" + meeting_topic;
+		return;
 	}
-	else if(topicL.contains("art of war") || topicL.contains("shameless pitching"))
-	{
-		sessionDay = "Day 2";
-	}
-}
-if(sessionDay == "")
-{
-	info "report: unknown topic=" + meeting_topic;
-	return;
 }
 if(check_type == null || check_type.trim() == "")
 {
-	info "report: check_type missing";
+	info "100BM report: check_type missing";
 	return;
 }
 check_type = check_type.trim().toLowerCase();
 if(check_type != "first" && check_type != "final" && check_type != "hour")
 {
-	info "report: invalid check_type=" + check_type;
+	info "100BM report: invalid check_type=" + check_type;
 	return;
 }
-attField = "Day_1_Attendance";
-if(sessionDay == "Day 2")
-{
-	attField = "Day_2_Attendance";
-}
-batch_start_date = batch_date;
-if(batch_start_date == null || batch_start_date.trim() == "" || batch_start_date == "null")
+invite_date = session_date;
+if(invite_date == null || invite_date.trim() == "" || invite_date == "null")
 {
 	if(start_time == null || start_time.trim() == "" || start_time == "null")
 	{
-		info "report: batch_date and start_time missing";
+		info "100BM report: session_date and start_time missing";
 		return;
 	}
-	meetingDate = start_time.substring(0,10);
-	meetingDt = meetingDate.toTime("yyyy-MM-dd");
-	if(sessionDay == "Day 1")
-	{
-		batch_start_date = meetingDate;
-	}
-	else
-	{
-		batch_start_date = (meetingDt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
-	}
+	invite_date = start_time.substring(0,10);
 }
-batch_ddMMyyyy = batch_start_date.subString(8,10) + "-" + batch_start_date.subString(5,7) + "-" + batch_start_date.subString(0,4);
-// Normalise join lists to ",a,b," form for safe membership checks + a set of joined emails for guests.
+invite_ddMMyyyy = invite_date.subString(8,10) + "-" + invite_date.subString(5,7) + "-" + invite_date.subString(0,4);
+// Normalise join lists to ",a,b," form for safe membership checks.
 presentCsv = "";
 if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
 {
@@ -84,8 +63,8 @@ if(ever_joined_emails != null && ever_joined_emails.trim() != "" && ever_joined_
 {
 	everCsv = "," + ever_joined_emails.toLowerCase().trim() + ",";
 }
-// Fetch this batch's paid leads (in-memory date filter; 10 pages x 200 = 2000 max).
-searchCriteria = "(Payment_Status:equals:Completed)";
+// Fetch this session's invited leads (FT_Invite_Date = session date; server-side search + in-memory verify).
+searchCriteria = "(FT_Invite_Date:equals:" + invite_date + ")";
 allLeads = List();
 pageNums = {1,2,3,4,5,6,7,8,9,10};
 for each pageNum in pageNums
@@ -112,13 +91,13 @@ rows = "";
 crmEmails = "";
 for each lead in allLeads
 {
-	leadDate = lead.get("MC_Start_Date_Time");
-	if(leadDate != null)
+	leadInvite = lead.get("FT_Invite_Date");
+	if(leadInvite != null)
 	{
-		dateYMD = leadDate.toString("yyyy-MM-dd");
-		dateDMY = leadDate.toString("dd-MM-yyyy");
-		rawDate = leadDate.toString();
-		if(dateYMD == batch_start_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_start_date) || rawDate.contains(batch_ddMMyyyy))
+		dateYMD = leadInvite.toString("yyyy-MM-dd");
+		dateDMY = leadInvite.toString("dd-MM-yyyy");
+		rawDate = leadInvite.toString();
+		if(dateYMD == invite_date || dateDMY == invite_ddMMyyyy || rawDate.contains(invite_date) || rawDate.contains(invite_ddMMyyyy))
 		{
 			matchedCount = matchedCount + 1;
 			leadEmail = lead.get("Email");
@@ -218,7 +197,7 @@ for each lead in allLeads
 		}
 	}
 }
-// Guests: emails that joined Zoom but do not match any CRM lead in this batch.
+// Guests: emails that joined Zoom but do not match any invited CRM lead for this session.
 crmEmailsCsv = crmEmails + ",";
 guestRows = "";
 guestCount = 0;
@@ -260,8 +239,8 @@ if(check_type == "final")
 }
 countLine = countLine + " &nbsp;|&nbsp; Total matched: <b>" + matchedCount + "</b>";
 html = "<div style='font-family:Segoe UI,Arial,sans-serif;color:#222;'>";
-html = html + "<h2>MC Attendance Report — " + checkLabel + "</h2>";
-html = html + "<p><b>" + sessionDay + "</b> &nbsp;|&nbsp; Batch: <b>" + batch_start_date + "</b> &nbsp;|&nbsp; Session: " + meeting_topic + "</p>";
+html = html + "<h2>100BM Attendance Report — " + checkLabel + "</h2>";
+html = html + "<p><b>FastTrack</b> &nbsp;|&nbsp; Invite date: <b>" + invite_date + "</b> &nbsp;|&nbsp; Session: " + meeting_topic + "</p>";
 html = html + "<p style='font-size:15px;'>" + countLine + "</p>";
 html = html + "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;font-size:13px;'>";
 html = html + "<tr style='background:#f0f0f0;'><th>#</th><th>Email</th><th>Name</th><th>Status</th><th>Reason</th></tr>";
@@ -292,8 +271,8 @@ else
 	html = html + "<li><b>No</b> — joined at some point but left before 30 min (dropout).</li>";
 	html = html + "<li><b>Absent</b> — never joined Zoom during the session.</li>";
 }
-html = html + "</ul><p style='color:#888;font-size:12px;'>Statuses are matched by email. Guests are people who joined Zoom with an email not found in CRM for this batch.</p></div>";
-subject = "MC Attendance — " + checkLabel + " — " + sessionDay + " " + batch_start_date + " (Yes " + yesCount + " / No " + noCount;
+html = html + "</ul><p style='color:#888;font-size:12px;'>Statuses are matched by email. Guests are people who joined Zoom with an email not found in CRM for this session (FT Invite Date).</p></div>";
+subject = "100BM Attendance — " + checkLabel + " — " + invite_date + " (Yes " + yesCount + " / No " + noCount;
 if(check_type == "final")
 {
 	subject = subject + " / Absent " + absentCount;
@@ -306,5 +285,5 @@ sendmail
 	subject :subject
 	message :html
 ]
-info "report sent: type=" + check_type + " matched=" + matchedCount + " yes=" + yesCount + " no=" + noCount + " absent=" + absentCount + " guests=" + guestCount;
+info "100BM report sent: type=" + check_type + " matched=" + matchedCount + " yes=" + yesCount + " no=" + noCount + " absent=" + absentCount + " guests=" + guestCount;
 }

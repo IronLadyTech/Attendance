@@ -2,6 +2,7 @@
 // Signature: void mark_100bm_batch_attendance_checkpoint(string start_time, string meeting_topic, string session_date, string check_type, string ever_joined_emails, string present_emails)
 //   check_type = "first"  → T+15: blank → No (sales calls)
 //   check_type = "final"  → T+30 safety: blank + in room → Yes; blank + never joined → Absent; dropout → No
+//   check_type = "hour"   → T+60 late opportunity: in room + No/Absent → Yes; not in room → unchanged
 // Eligibility: FT_Invite_Date matches session_date (no Payment_Status filter)
 // FT_attended_date is set whenever FT_attendance becomes Yes.
 // Connection: zoho_flow_to_zoho_crm
@@ -34,7 +35,7 @@ if(check_type == null || check_type.trim() == "")
 	return;
 }
 check_type = check_type.trim().toLowerCase();
-if(check_type != "first" && check_type != "final")
+if(check_type != "first" && check_type != "final" && check_type != "hour")
 {
 	info "100BM checkpoint: invalid check_type=" + check_type;
 	return;
@@ -104,6 +105,42 @@ for each lead in allLeads
 				{
 					recMap.put("FT_attendance","No");
 					needsUpdate = true;
+				}
+			}
+			else if(check_type == "hour")
+			{
+				// T+60 — upgrade only: in room at 1hr + No/Absent → Yes (+ attended date)
+				inPresent = false;
+				leadEmail = lead.get("Email");
+				if(leadEmail != null && leadEmail.trim() != "" && leadEmail != "null")
+				{
+					emailL = leadEmail.toLowerCase().trim();
+					if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+					{
+						peCsv = "," + present_emails.toLowerCase() + ",";
+						if(peCsv.contains("," + emailL + ","))
+						{
+							inPresent = true;
+						}
+					}
+				}
+				if(inPresent)
+				{
+					cur = "";
+					if(ftAtt != null)
+					{
+						cur = ftAtt.toString().trim();
+					}
+					if(cur == "Yes")
+					{
+						// unchanged
+					}
+					else if(cur == "No" || cur == "Absent" || ftBlank)
+					{
+						recMap.put("FT_attendance","Yes");
+						recMap.put("FT_attended_date",invite_date);
+						needsUpdate = true;
+					}
 				}
 			}
 			else
@@ -196,10 +233,10 @@ for each recMap in updateList
 		bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
 		chunkOk = 0;
 		chunkFail = 0;
-		respData = bulkResp.get("data");
-		if(respData != null)
+		// zoho.crm.bulkUpdate returns a List of per-record response maps — iterate it directly.
+		if(bulkResp != null)
 		{
-			for each row in respData
+			for each row in bulkResp
 			{
 				if(row.get("status") == "success")
 				{
@@ -223,10 +260,10 @@ if(chunk.size() > 0)
 	bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
 	chunkOk = 0;
 	chunkFail = 0;
-	respData = bulkResp.get("data");
-	if(respData != null)
+	// zoho.crm.bulkUpdate returns a List of per-record response maps — iterate it directly.
+	if(bulkResp != null)
 	{
-		for each row in respData
+		for each row in bulkResp
 		{
 			if(row.get("status") == "success")
 			{
