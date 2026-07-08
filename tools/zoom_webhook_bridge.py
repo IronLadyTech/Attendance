@@ -10,12 +10,11 @@ MC route (POST /):
   - T+60 → mark_yes for everyone in roster + attendance.hour_check (late Yes upgrade only)
   - meeting.ended (MC topic) → meeting.ended to Zoho (MC Completed only; no attendance)
 
-100BM route (POST /100bm) — same T+15 / T+30 checkpoint model as MC:
-  - meeting.started (100BM topic) → schedule T+15 and T+30 checkpoint sweeps
-  - meeting.participant_joined / left → maintain in-meeting roster
+100BM route (POST /100bm) — same T+15 / T+30 / T+60 checkpoint model as MC:
+  - meeting.started (100BM topic) → schedule remaining checkpoint sweeps from start_time
+  - meeting.participant_joined / left → maintain roster; after redeploy, recover timers from start_time
   - T+15 → mark_yes (in room) + lookup (joined-left) + attendance.first_check
   - T+30 → mark_yes (in room) + mark_no (joined-left dropout) + attendance.final_check
-           (final_check carries present_emails + ever_joined_emails for batch safety net)
   - T+60 → mark_yes (in room) + attendance.hour_check (upgrade No/Absent → Yes only)
 
 Environment variables required:
@@ -292,18 +291,82 @@ def _mc_cancel_timers(state: dict) -> None:
         t.cancel()
 
 
+def _seconds_since_meeting_start(start_time: str) -> float:
+    """UTC seconds elapsed since Zoom start_time (0 if missing/unparseable)."""
+    if not start_time or str(start_time).strip() in ("", "null"):
+        return 0.0
+    started = _parse_zoom_datetime(str(start_time))
+    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+
+
+def _schedule_checkpoint_timers(
+    meeting_id: str,
+    state: dict,
+    *,
+    sweep_fn,
+    delays: list[tuple[int, int]],
+    log_prefix: str,
+) -> None:
+    """
+    Schedule only checkpoints still in the future, based on meeting start_time.
+
+    Survives Render/Railway redeploys: after restart, the next join recreates state and
+    this recomputes remaining delay (e.g. only T+60 left). Past first/final are skipped
+    so we do not re-fire blank→No / Absent. If the hour check is already due (or slightly
+    overdue), run sweep 3 soon so late Yes upgrades are not lost.
+    """
+    for t in state.get("timers", []):
+        t.cancel()
+
+    elapsed = _seconds_since_meeting_start(state.get("start_time", ""))
+    timers: list[threading.Timer] = []
+    planned: list[str] = []
+    for sweep, target_sec in delays:
+        remaining = float(target_sec) - elapsed
+        if remaining <= 0:
+            # Past due: only catch up the hour sweep (late Yes). Skip earlier sweeps.
+            if sweep == 3 and remaining > -7200:
+                overdue = -remaining
+                remaining = 2.0
+                planned.append(f"sweep{sweep}=immediate(overdue by {overdue:.0f}s)")
+            else:
+                sys.stderr.write(
+                    f"[{log_prefix}] Skip past checkpoint sweep{sweep} "
+                    f"(elapsed={elapsed:.0f}s target={target_sec}s) meeting={meeting_id}\n"
+                )
+                continue
+        else:
+            planned.append(f"sweep{sweep}=T+{remaining:.0f}s")
+
+        timer = threading.Timer(remaining, sweep_fn, args=[meeting_id, sweep])
+        timer.daemon = True
+        timer.start()
+        timers.append(timer)
+
+    state["timers"] = timers
+    if timers:
+        sys.stderr.write(
+            f"[{log_prefix}] Checkpoints scheduled (elapsed={elapsed:.0f}s): "
+            f"{', '.join(planned)} meeting={meeting_id}\n"
+        )
+    else:
+        sys.stderr.write(
+            f"[{log_prefix}] No checkpoint timers left (elapsed={elapsed:.0f}s) "
+            f"meeting={meeting_id}\n"
+        )
+
+
 def _mc_schedule_checkpoints(meeting_id: str, state: dict) -> None:
-    _mc_cancel_timers(state)
-    t1 = threading.Timer(_MC_CHECKPOINT_1, _mc_sweep, args=[meeting_id, 1])
-    t2 = threading.Timer(_MC_CHECKPOINT_2, _mc_sweep, args=[meeting_id, 2])
-    t3 = threading.Timer(_MC_CHECKPOINT_3, _mc_sweep, args=[meeting_id, 3])
-    for t in (t1, t2, t3):
-        t.daemon = True
-        t.start()
-    state["timers"] = [t1, t2, t3]
-    sys.stderr.write(
-        f"[started] Checkpoints scheduled: T+{_MC_CHECKPOINT_1}s, T+{_MC_CHECKPOINT_2}s, "
-        f"T+{_MC_CHECKPOINT_3}s meeting={meeting_id}\n"
+    _schedule_checkpoint_timers(
+        meeting_id,
+        state,
+        sweep_fn=_mc_sweep,
+        delays=[
+            (1, _MC_CHECKPOINT_1),
+            (2, _MC_CHECKPOINT_2),
+            (3, _MC_CHECKPOINT_3),
+        ],
+        log_prefix="started",
     )
 
 
@@ -386,8 +449,15 @@ def _handle_mc_participant_joined(body: dict, forward_url: str) -> None:
                 "timers": [],
             }
             _mc_meetings[meeting_id] = state
+            _mc_schedule_checkpoints(meeting_id, state)
             sys.stderr.write(
-                f"[join/mc] Roster created before meeting.started meeting={meeting_id}\n"
+                f"[join/mc] Roster + checkpoints recovered (no prior state) "
+                f"meeting={meeting_id}\n"
+            )
+        elif not state.get("timers"):
+            _mc_schedule_checkpoints(meeting_id, state)
+            sys.stderr.write(
+                f"[join/mc] Rescheduled empty timers meeting={meeting_id}\n"
             )
 
         pinfo = {
@@ -570,17 +640,16 @@ def _100bm_cancel_timers(state: dict) -> None:
 
 
 def _100bm_schedule_checkpoints(meeting_id: str, state: dict) -> None:
-    _100bm_cancel_timers(state)
-    t1 = threading.Timer(_BM100_CHECKPOINT_1, _100bm_sweep, args=[meeting_id, 1])
-    t2 = threading.Timer(_BM100_CHECKPOINT_2, _100bm_sweep, args=[meeting_id, 2])
-    t3 = threading.Timer(_BM100_CHECKPOINT_3, _100bm_sweep, args=[meeting_id, 3])
-    for t in (t1, t2, t3):
-        t.daemon = True
-        t.start()
-    state["timers"] = [t1, t2, t3]
-    sys.stderr.write(
-        f"[100bm/started] Checkpoints scheduled: T+{_BM100_CHECKPOINT_1}s, T+{_BM100_CHECKPOINT_2}s, "
-        f"T+{_BM100_CHECKPOINT_3}s meeting={meeting_id}\n"
+    _schedule_checkpoint_timers(
+        meeting_id,
+        state,
+        sweep_fn=_100bm_sweep,
+        delays=[
+            (1, _BM100_CHECKPOINT_1),
+            (2, _BM100_CHECKPOINT_2),
+            (3, _BM100_CHECKPOINT_3),
+        ],
+        log_prefix="100bm/started",
     )
 
 
@@ -643,6 +712,8 @@ def _handle_100bm_participant_joined(body: dict, forward_url: str) -> None:
     with _100bm_lock:
         state = _100bm_meetings.get(meeting_id)
         if state is None:
+            # After Render/Railway redeploy, memory is empty — rebuild state and
+            # reschedule any checkpoints still in the future (usually T+60).
             session_date = _session_date_ist(join_time or obj.get("start_time", ""))
             state = {
                 "meeting_id": meeting_id,
@@ -655,8 +726,15 @@ def _handle_100bm_participant_joined(body: dict, forward_url: str) -> None:
                 "timers": [],
             }
             _100bm_meetings[meeting_id] = state
+            _100bm_schedule_checkpoints(meeting_id, state)
             sys.stderr.write(
-                f"[100bm/join] Roster created before meeting.started meeting={meeting_id}\n"
+                f"[100bm/join] Roster + checkpoints recovered (no prior state) "
+                f"meeting={meeting_id}\n"
+            )
+        elif not state.get("timers"):
+            _100bm_schedule_checkpoints(meeting_id, state)
+            sys.stderr.write(
+                f"[100bm/join] Rescheduled empty timers meeting={meeting_id}\n"
             )
 
         pinfo = {
