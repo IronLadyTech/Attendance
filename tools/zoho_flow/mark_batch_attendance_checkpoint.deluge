@@ -68,56 +68,50 @@ if(batch_start_date == null || batch_start_date.trim() == "" || batch_start_date
 }
 batch_ddMMyyyy = batch_start_date.subString(8,10) + "-" + batch_start_date.subString(5,7) + "-" + batch_start_date.subString(0,4);
 info "checkpoint: type=" + check_type + " session=" + sessionDay + " batch=" + batch_start_date;
-// Payment_Status (UI: MC Payment Status) = Completed. Date filtering is done in-memory below
-// (searchRecords criteria on the MC_Start_Date_Time datetime field is unreliable). 10 pages x 200
-// = up to 2000 Completed leads; keep pages small so the function stays under the 30s limit.
-searchCriteria = "(Payment_Status:equals:Completed)";
+// Batch-scoped COQL: Completed + MC_Start_Date_Time on batch day (matches CRM view count).
+dayStart = batch_start_date + "T00:00:00+05:30";
+dayEnd = batch_start_date + "T23:59:59+05:30";
 allLeads = List();
-pageNums = {1,2,3,4,5,6,7,8,9,10};
-for each pageNum in pageNums
+offsets = {0,200,400,600,800,1000,1200,1400,1600,1800};
+for each off in offsets
 {
-	pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
-	if(pageLeads != null && pageLeads.size() >= 1)
+	coqlQuery = "select id, Email, Full_Name, Day_1_Attendance, Day_2_Attendance, MC_Start_Date_Time from Leads where Payment_Status = 'Completed' and MC_Start_Date_Time >= '" + dayStart + "' and MC_Start_Date_Time <= '" + dayEnd + "' limit 200 offset " + off;
+	coqlBody = Map();
+	coqlBody.put("select_query",coqlQuery);
+	coqlResp = invokeurl
+	[
+		url :"https://www.zohoapis.in/crm/v7/coql"
+		type :POST
+		parameters:coqlBody.toString()
+		connection:"zoho_flow_to_zoho_crm"
+	];
+	pageLeads = coqlResp.get("data");
+	if(pageLeads == null || pageLeads.size() == 0)
 	{
-		allLeads.addAll(pageLeads);
-		if(pageLeads.size() < 200)
-		{
-			break;
-		}
+		break;
 	}
-	else
+	allLeads.addAll(pageLeads);
+	info "COQL batch page offset=" + off + " size=" + pageLeads.size();
+	if(pageLeads.size() < 200)
 	{
 		break;
 	}
 }
-info "Total CRM leads fetched: " + allLeads.size();
+info "Total batch leads fetched (COQL): " + allLeads.size();
 updateList = List();
 skippedCount = 0;
 matchedCount = 0;
 for each lead in allLeads
 {
-	leadDate = lead.get("MC_Start_Date_Time");
-	if(leadDate != null)
-	{
-		dateYMD = leadDate.toString("yyyy-MM-dd");
-		dateDMY = leadDate.toString("dd-MM-yyyy");
-		rawDate = leadDate.toString();
-		dateMatch = false;
-		if(dateYMD == batch_start_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_start_date) || rawDate.contains(batch_ddMMyyyy))
-		{
-			dateMatch = true;
-		}
-		if(dateMatch)
-		{
-			matchedCount = matchedCount + 1;
-			leadId = lead.get("id");
-			day1 = lead.get("Day_1_Attendance");
-			day2 = lead.get("Day_2_Attendance");
-			recMap = Map();
-			recMap.put("id",leadId);
-			needsUpdate = false;
-			day1Blank = day1 == null || day1 == "-None-" || day1.toString().trim() == "" || day1.toString().trim() == "null";
-			day2Blank = day2 == null || day2 == "-None-" || day2.toString().trim() == "" || day2.toString().trim() == "null";
+	matchedCount = matchedCount + 1;
+	leadId = lead.get("id");
+	day1 = lead.get("Day_1_Attendance");
+	day2 = lead.get("Day_2_Attendance");
+	recMap = Map();
+	recMap.put("id",leadId);
+	needsUpdate = false;
+	day1Blank = day1 == null || day1 == "-None-" || day1.toString().trim() == "" || day1.toString().trim() == "null";
+	day2Blank = day2 == null || day2 == "-None-" || day2.toString().trim() == "" || day2.toString().trim() == "null";
 			if(check_type == "first")
 			{
 				if(sessionDay == "Day 1")
@@ -339,8 +333,6 @@ for each lead in allLeads
 			{
 				skippedCount = skippedCount + 1;
 			}
-		}
-	}
 }
 // bulkUpdate allows max 100 records per call — send in groups of 100 (handles any batch size, 350+)
 updatedCount = 0;

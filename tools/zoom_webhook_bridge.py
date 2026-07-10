@@ -25,6 +25,8 @@ Optional:
   MC_CHECKPOINT_1_SECONDS (default 900 = 15 min)
   MC_CHECKPOINT_2_SECONDS (default 1800 = 30 min)
   MC_CHECKPOINT_3_SECONDS (default 3600 = 60 min)
+  MC_USE_MLM_PLANNED_START (default 1) — schedule checkpoints from Meeting Link Manager
+  ZOHO_CRM_CLIENT_ID / ZOHO_CRM_CLIENT_SECRET / ZOHO_CRM_REFRESH_TOKEN (for MLM lookup)
   BM100_CHECKPOINT_1_SECONDS (default 900 = 15 min, 100BM route)
   BM100_CHECKPOINT_2_SECONDS (default 1800 = 30 min, 100BM route)
   BM100_CHECKPOINT_3_SECONDS (default 3600 = 60 min, 100BM route)
@@ -46,6 +48,11 @@ from socketserver import ThreadingMixIn
 import requests
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _TOOLS_DIR)
+
+from zoho_crm_mlm import resolve_checkpoint_anchor  # noqa: E402
 
 # MC checkpoint delays from actual Zoom meeting start
 _MC_CHECKPOINT_1 = int(os.environ.get("MC_CHECKPOINT_1_SECONDS", "900"))   # T+15
@@ -286,17 +293,20 @@ def _mc_sweep(meeting_id: str, sweep: int) -> None:
     _post_to_zoho(forward_url, payload, f"mc-sweep{sweep}")
 
 
+def _apply_checkpoint_anchor(state: dict) -> None:
+    """Set checkpoint_anchor from Meeting Link Manager planned time (fallback: Zoom start)."""
+    session_day = state.get("session_day", "Day 1")
+    session_date = state.get("session_date", "")
+    zoom_start = state.get("start_time", "")
+    anchor, source = resolve_checkpoint_anchor(session_day, session_date, zoom_start)
+    state["planned_start_time"] = anchor
+    state["checkpoint_anchor"] = anchor
+    state["checkpoint_anchor_source"] = source
+
+
 def _mc_cancel_timers(state: dict) -> None:
     for t in state.get("timers", []):
         t.cancel()
-
-
-def _seconds_since_meeting_start(start_time: str) -> float:
-    """UTC seconds elapsed since Zoom start_time (0 if missing/unparseable)."""
-    if not start_time or str(start_time).strip() in ("", "null"):
-        return 0.0
-    started = _parse_zoom_datetime(str(start_time))
-    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
 
 
 def _schedule_checkpoint_timers(
@@ -308,23 +318,32 @@ def _schedule_checkpoint_timers(
     log_prefix: str,
 ) -> None:
     """
-    Schedule only checkpoints still in the future, based on meeting start_time.
+    Schedule checkpoints at anchor + offset (T+15 / T+30 / T+60).
 
-    Survives Render/Railway redeploys: after restart, the next join recreates state and
-    this recomputes remaining delay (e.g. only T+60 left). Past first/final are skipped
-    so we do not re-fire blank→No / Absent. If the hour check is already due (or slightly
-    overdue), run sweep 3 soon so late Yes upgrades are not lost.
+    Anchor = Meeting Link Manager planned start when CRM OAuth is configured,
+    otherwise Zoom meeting.started. Survives redeploys; past first/final are skipped.
     """
     for t in state.get("timers", []):
         t.cancel()
 
-    elapsed = _seconds_since_meeting_start(state.get("start_time", ""))
+    if not state.get("checkpoint_anchor"):
+        _apply_checkpoint_anchor(state)
+
+    anchor = _parse_zoom_datetime(state.get("checkpoint_anchor") or state.get("start_time", ""))
+    now = datetime.now(timezone.utc)
+    source = state.get("checkpoint_anchor_source", "?")
     timers: list[threading.Timer] = []
     planned: list[str] = []
-    for sweep, target_sec in delays:
-        remaining = float(target_sec) - elapsed
+
+    sys.stderr.write(
+        f"[{log_prefix}] checkpoint anchor={anchor.astimezone(_IST).isoformat()} "
+        f"source={source} zoom_start={state.get('start_time', '')!r} meeting={meeting_id}\n"
+    )
+
+    for sweep, offset_sec in delays:
+        fire_at = anchor + timedelta(seconds=float(offset_sec))
+        remaining = (fire_at - now).total_seconds()
         if remaining <= 0:
-            # Past due: only catch up the hour sweep (late Yes). Skip earlier sweeps.
             if sweep == 3 and remaining > -7200:
                 overdue = -remaining
                 remaining = 2.0
@@ -332,11 +351,12 @@ def _schedule_checkpoint_timers(
             else:
                 sys.stderr.write(
                     f"[{log_prefix}] Skip past checkpoint sweep{sweep} "
-                    f"(elapsed={elapsed:.0f}s target={target_sec}s) meeting={meeting_id}\n"
+                    f"(fire_at={fire_at.astimezone(_IST).isoformat()} "
+                    f"offset={offset_sec}s) meeting={meeting_id}\n"
                 )
                 continue
         else:
-            planned.append(f"sweep{sweep}=T+{remaining:.0f}s")
+            planned.append(f"sweep{sweep}=in {remaining:.0f}s (at +{offset_sec}s from anchor)")
 
         timer = threading.Timer(remaining, sweep_fn, args=[meeting_id, sweep])
         timer.daemon = True
@@ -346,13 +366,11 @@ def _schedule_checkpoint_timers(
     state["timers"] = timers
     if timers:
         sys.stderr.write(
-            f"[{log_prefix}] Checkpoints scheduled (elapsed={elapsed:.0f}s): "
-            f"{', '.join(planned)} meeting={meeting_id}\n"
+            f"[{log_prefix}] Checkpoints scheduled: {', '.join(planned)} meeting={meeting_id}\n"
         )
     else:
         sys.stderr.write(
-            f"[{log_prefix}] No checkpoint timers left (elapsed={elapsed:.0f}s) "
-            f"meeting={meeting_id}\n"
+            f"[{log_prefix}] No checkpoint timers left meeting={meeting_id}\n"
         )
 
 
@@ -404,12 +422,14 @@ def _handle_meeting_started(body: dict, forward_url: str) -> None:
             "ever_joined": ever_joined,
             "timers": [],
         }
+        _apply_checkpoint_anchor(state)
         _mc_schedule_checkpoints(meeting_id, state)
         _mc_meetings[meeting_id] = state
 
     sys.stderr.write(
         f"[started] MC {session_day} meeting={meeting_id} "
-        f"session={session_date} batch={batch} roster={len(roster)}\n"
+        f"session={session_date} batch={batch} roster={len(roster)} "
+        f"anchor={state.get('checkpoint_anchor_source', '?')}\n"
     )
 
 
@@ -449,12 +469,14 @@ def _handle_mc_participant_joined(body: dict, forward_url: str) -> None:
                 "timers": [],
             }
             _mc_meetings[meeting_id] = state
+            _apply_checkpoint_anchor(state)
             _mc_schedule_checkpoints(meeting_id, state)
             sys.stderr.write(
                 f"[join/mc] Roster + checkpoints recovered (no prior state) "
                 f"meeting={meeting_id}\n"
             )
         elif not state.get("timers"):
+            _apply_checkpoint_anchor(state)
             _mc_schedule_checkpoints(meeting_id, state)
             sys.stderr.write(
                 f"[join/mc] Rescheduled empty timers meeting={meeting_id}\n"
@@ -904,6 +926,12 @@ def make_handler(secret: str, forward_url: str, secret_100bm: str = "", forward_
                 "active_mc_meetings": active_mc,
                 "active_100bm_meetings": active_100bm,
                 "route_100bm": bool(self._secret_100bm),
+                "mlm_planned_start_enabled": os.environ.get("MC_USE_MLM_PLANNED_START", "1") not in ("0", "false", "no"),
+                "mlm_crm_configured": bool(
+                    os.environ.get("ZOHO_CRM_CLIENT_ID", "").strip()
+                    and os.environ.get("ZOHO_CRM_CLIENT_SECRET", "").strip()
+                    and os.environ.get("ZOHO_CRM_REFRESH_TOKEN", "").strip()
+                ),
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
