@@ -316,18 +316,24 @@ def _schedule_checkpoint_timers(
     sweep_fn,
     delays: list[tuple[int, int]],
     log_prefix: str,
+    use_mlm: bool = True,
 ) -> None:
     """
     Schedule checkpoints at anchor + offset (T+15 / T+30 / T+60).
 
-    Anchor = Meeting Link Manager planned start when CRM OAuth is configured,
-    otherwise Zoom meeting.started. Survives redeploys; past first/final are skipped.
+    Anchor = Meeting Link Manager planned start when CRM OAuth is configured
+    (MC only — MLM has no 100BM records), otherwise Zoom meeting.started.
+    Survives redeploys; past first/final are skipped.
     """
     for t in state.get("timers", []):
         t.cancel()
 
     if not state.get("checkpoint_anchor"):
-        _apply_checkpoint_anchor(state)
+        if use_mlm:
+            _apply_checkpoint_anchor(state)
+        else:
+            state["checkpoint_anchor"] = state.get("start_time", "")
+            state["checkpoint_anchor_source"] = "zoom"
 
     anchor = _parse_zoom_datetime(state.get("checkpoint_anchor") or state.get("start_time", ""))
     now = datetime.now(timezone.utc)
@@ -672,6 +678,7 @@ def _100bm_schedule_checkpoints(meeting_id: str, state: dict) -> None:
             (3, _BM100_CHECKPOINT_3),
         ],
         log_prefix="100bm/started",
+        use_mlm=False,
     )
 
 

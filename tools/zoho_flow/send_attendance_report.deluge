@@ -84,14 +84,19 @@ if(ever_joined_emails != null && ever_joined_emails.trim() != "" && ever_joined_
 {
 	everCsv = "," + ever_joined_emails.toLowerCase().trim() + ",";
 }
-// Batch-scoped COQL: Completed + MC_Start_Date_Time on batch day (matches CRM view count).
-dayStart = batch_start_date + "T00:00:00+05:30";
-dayEnd = batch_start_date + "T23:59:59+05:30";
+// CRM view filters by calendar date (10/07/26); strict IST datetime between can miss edge cases.
+batchDt = batch_start_date.toTime("yyyy-MM-dd");
+dayBefore = (batchDt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
+dayAfter = (batchDt.toLong() + 86400000).toTime().toString("yyyy-MM-dd");
+batch_ddMMyy = batch_start_date.subString(8,10) + "/" + batch_start_date.subString(5,7) + "/" + batch_start_date.subString(2,4);
+dayStart = dayBefore + "T00:00:00+05:30";
+dayEnd = dayAfter + "T23:59:59+05:30";
 allLeads = List();
+seenIds = ",";
 offsets = {0,200,400,600,800,1000,1200,1400,1600,1800};
 for each off in offsets
 {
-	coqlQuery = "select id, Email, Full_Name, Day_1_Attendance, Day_2_Attendance, MC_Start_Date_Time from Leads where Payment_Status = 'Completed' and MC_Start_Date_Time >= '" + dayStart + "' and MC_Start_Date_Time <= '" + dayEnd + "' limit 200 offset " + off;
+	coqlQuery = "select id, Email, Full_Name, Day_1_Attendance, Day_2_Attendance, MC_Start_Date_Time from Leads where Payment_Status = 'Completed' and (MC_Start_Date_Time between '" + dayStart + "' and '" + dayEnd + "') limit " + off + ", 200";
 	coqlBody = Map();
 	coqlBody.put("select_query",coqlQuery);
 	coqlResp = invokeurl
@@ -104,9 +109,40 @@ for each off in offsets
 	pageLeads = coqlResp.get("data");
 	if(pageLeads == null || pageLeads.size() == 0)
 	{
+		if(off == 0)
+		{
+			info "COQL resp (offset 0)=" + coqlResp.toString();
+		}
 		break;
 	}
-	allLeads.addAll(pageLeads);
+	pageAdded = 0;
+	for each lead in pageLeads
+	{
+		leadId = lead.get("id").toString();
+		if(seenIds.contains("," + leadId + ","))
+		{
+			continue;
+		}
+		leadDate = lead.get("MC_Start_Date_Time");
+		dateMatch = false;
+		if(leadDate != null)
+		{
+			dateYMD = leadDate.toString("yyyy-MM-dd");
+			dateDMY = leadDate.toString("dd-MM-yyyy");
+			rawDate = leadDate.toString();
+			if(dateYMD == batch_start_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_start_date) || rawDate.contains(batch_ddMMyyyy) || rawDate.contains(batch_ddMMyy))
+			{
+				dateMatch = true;
+			}
+		}
+		if(dateMatch)
+		{
+			seenIds = seenIds + leadId + ",";
+			allLeads.add(lead);
+			pageAdded = pageAdded + 1;
+		}
+	}
+	info "report COQL page offset=" + off + " raw=" + pageLeads.size() + " matched=" + pageAdded;
 	if(pageLeads.size() < 200)
 	{
 		break;
