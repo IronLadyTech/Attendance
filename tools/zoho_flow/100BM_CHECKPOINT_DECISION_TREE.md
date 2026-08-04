@@ -37,7 +37,7 @@ Payload > Event  equals  attendance.mark_yes
 ```
 
 **Action:** `mark_100bm_attendance_yes`
-Sets `FT_attendance = Yes` and `FT_attended_date = session date`.
+Matches lead by **email/name** (any invite date). Sets `FT_attendance = Yes` and `FT_attended_date = actual session date`. **Does not change** `FT_Invite_Date` (supports makeup sessions).
 
 ---
 
@@ -171,7 +171,7 @@ All map from `${webhookTrigger.payload.<field>}` except `check_type` (literal `f
 | | MC | 100BM |
 |--|----|-------|
 | Attendance field | `Day_1_Attendance` / `Day_2_Attendance` | `FT_attendance` |
-| Attended date | — | `FT_attended_date` (set on Yes) |
+| Attended date | — | `FT_attended_date` = session date on **Yes / No / Absent**; invite date unchanged |
 | Eligibility | `Payment_Status = Completed` + `MC_Start_Date_Time` = batch | `FT_Invite_Date` = session date |
 | Sessions | Day 1 + Day 2 (topic split) | Single FastTrack session |
 | End of program | `mark_mc_completed` on Day 2 | none |

@@ -1,0 +1,121 @@
+// Zoho Flow custom function — LEP final attendance (majority of 3 checks)
+// Signature: void mark_lep_attendance_final(string participant_email, string participant_name, string meeting_topic, string session_date, string session_day, string attendance_result)
+// Connection: zoho_flow_to_zoho_crm
+//
+// Match lead by email or name ONLY (no batch / LEP_Start_Date filter — previous-batch
+// participants may join this session). Only people in the Zoom meeting are marked.
+// Updates LEP_Day_1_Session or LEP_Day_2_Session to Present / Absent.
+//
+// Flow mapping (attendance.lep_final branch):
+//   participant_email  = ${webhookTrigger.payload.participant_email}
+//   participant_name   = ${webhookTrigger.payload.participant_name}
+//   meeting_topic      = ${webhookTrigger.payload.meeting_topic}
+//   session_date       = ${webhookTrigger.payload.session_date}
+//   session_day        = ${webhookTrigger.payload.session_day}
+//   attendance_result  = ${webhookTrigger.payload.attendance_result}
+
+void mark_lep_attendance_final(string participant_email, string participant_name, string meeting_topic, string session_date, string session_day, string attendance_result)
+{
+info "LEP FINAL: email=" + participant_email + " name=" + participant_name + " day=" + session_day + " result=" + attendance_result + " session=" + session_date;
+if(meeting_topic == null || meeting_topic.trim() == "" || meeting_topic == "null")
+{
+	info "LEP FINAL: no meeting topic - skipping";
+	return;
+}
+if(!meeting_topic.toLowerCase().contains("il lep sessions"))
+{
+	info "LEP FINAL: unknown topic - skipping: " + meeting_topic;
+	return;
+}
+if(attendance_result == null || attendance_result.trim() == "" || attendance_result == "null")
+{
+	info "LEP FINAL: attendance_result missing - skipping";
+	return;
+}
+resultVal = attendance_result.trim();
+if(resultVal != "Present" && resultVal != "Absent")
+{
+	info "LEP FINAL: invalid attendance_result=" + resultVal;
+	return;
+}
+fieldName = "LEP_Day_1_Session";
+if(session_day != null && session_day.toLowerCase().contains("day 2"))
+{
+	fieldName = "LEP_Day_2_Session";
+}
+lead_list = List();
+// --- Find lead by email (any batch) ---
+if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
+{
+	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")",1,5);
+	if(ls != null && ls.size() > 0)
+	{
+		lead_list.add(ls.get(0));
+	}
+}
+// --- Name fallback (any batch) ---
+if(lead_list == null || lead_list.size() == 0)
+{
+	if(participant_name != null && participant_name.trim() != "" && participant_name != "null")
+	{
+		clean_name = participant_name.replaceAll("Ms. ","").replaceAll("Mr. ","").replaceAll("Mrs. ","").replaceAll("Dr. ","").replaceAll("Prof. ","").replaceAll("Miss ","").replaceAll("Rev. ","").trim();
+		if(clean_name.length() > 0)
+		{
+			space_idx = clean_name.indexOf(" ");
+			if(space_idx > 0)
+			{
+				raw_first = clean_name.substring(0,space_idx).trim();
+				last_space_idx = clean_name.lastIndexOf(" ");
+				raw_last = clean_name.substring(last_space_idx + 1).trim();
+				if(raw_first.length() > 1 && raw_last.length() > 1)
+				{
+					first_tc = raw_first.substring(0,1).toUpperCase() + raw_first.substring(1).toLowerCase();
+					last_tc = raw_last.substring(0,1).toUpperCase() + raw_last.substring(1).toLowerCase();
+					lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + first_tc + ")and(Last_Name:equals:" + last_tc + ")",1,5);
+					if(lead_list == null || lead_list.size() == 0)
+					{
+						lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + raw_first.toUpperCase() + ")and(Last_Name:equals:" + raw_last.toUpperCase() + ")",1,5);
+					}
+					if(lead_list == null || lead_list.size() == 0)
+					{
+						lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + raw_first.toLowerCase() + ")and(Last_Name:equals:" + raw_last.toLowerCase() + ")",1,5);
+					}
+				}
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name + ")",1,5);
+				}
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name.toUpperCase() + ")",1,5);
+				}
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name.toLowerCase() + ")",1,5);
+				}
+			}
+			else
+			{
+				name_tc = clean_name.substring(0,1).toUpperCase() + clean_name.substring(1).toLowerCase();
+				lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + name_tc + ")",1,5);
+				if(lead_list == null || lead_list.size() == 0)
+				{
+					lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + name_tc + ")",1,5);
+				}
+			}
+		}
+	}
+}
+if(lead_list == null || lead_list.size() == 0)
+{
+	info "LEP FINAL: lead not found for email=" + participant_email + " name=" + participant_name;
+	return;
+}
+lead = lead_list.get(0);
+lead_id = lead.get("id").toString();
+updateMap = Map();
+updateMap.put("id",lead_id);
+updateMap.put(fieldName,resultVal);
+resp = zoho.crm.updateRecord("Leads",lead_id,updateMap);
+info "LEP FINAL: updated lead=" + lead_id + " " + fieldName + "=" + resultVal + " resp=" + resp.toString();
+}

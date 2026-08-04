@@ -35,15 +35,18 @@
 <p>Nothing is marked at join time. CRM updates only at <strong>15 min</strong>, <strong>30 min</strong>, and <strong>60 min</strong>.</p>
 
 <h2>Which leads are processed?</h2>
-<p>A lead is included when its <strong>FT Invite Date</strong> matches the session date. No payment status is required.</p>
+<p><strong>Batch checkpoint</strong> (No / Absent for the day): leads whose <strong>FT Invite Date</strong> matches today’s session date.</p>
+<p><strong>Mark Yes</strong> (person in Zoom): match by <strong>email</strong> even if invite date is different (makeup). Sets attendance date to <strong>today’s session date</strong>; invite date stays as-is.</p>
 
 <h2>CRM fields used</h2>
 <table>
   <tr><th>Field</th><th>What goes in it</th></tr>
   <tr><td><strong>FT Attendance</strong></td><td><strong>Yes</strong>, <strong>No</strong>, or <strong>Absent</strong></td></tr>
-  <tr><td><strong>FT Attended Date</strong></td><td>The session date — filled in <strong>only when FT Attendance is Yes</strong>; cleared (blank) when attendance becomes <strong>No</strong> or <strong>Absent</strong></td></tr>
-  <tr><td><strong>FT Invite Date</strong></td><td>Used only to decide who is part of today's session (not changed)</td></tr>
+  <tr><td><strong>FT Invite Date</strong></td><td>Original invitation date — <strong>never changed</strong> by attendance</td></tr>
+  <tr><td><strong>FT Attended Date</strong></td><td>Session date when attendance was processed — set for <strong>Yes, No, and Absent</strong> (can differ from invite for makeup); Invite Date never changed</td></tr>
 </table>
+
+<p><strong>Example (makeup):</strong> Invite Date = 10 Jul, attends Orientation on 17 Jul → <code>FT_attendance = Yes</code>, <code>FT_attended_date = 2026-07-17</code>, <code>FT_Invite_Date</code> still 10 Jul.</p>
 
 <h2>The three attendance values in CRM</h2>
 <table>

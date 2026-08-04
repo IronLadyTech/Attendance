@@ -1,0 +1,272 @@
+// Zoho CRM custom function — MC Enrolled → MC Completed (blueprint)
+// Signature in CRM: string standalone.mark_mc_completed(String start_time)
+// Connection: zohocrmblueprint
+//
+// start_time = Day 2 meeting datetime; batch = Day 2 minus 1 day (MC Start Date).
+// Blueprint transition "MC Completed" requires: Day_1_Attendance, Day_2_Attendance, City, State, Notes.
+// On invalid transition (other blueprint process/version), re-fetch that lead's transition_id and retry once.
+
+string standalone.mark_mc_completed(String start_time)
+{
+todayStr = zoho.currentdate.toString("yyyy-MM-dd");
+batch_start_date = "";
+if(start_time != null && start_time.trim() != "" && start_time != "null")
+{
+	day2_date = start_time.substring(0,10);
+	day2_dt = day2_date.toTime("yyyy-MM-dd");
+	batch_start_date = (day2_dt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
+	info "Webhook mode: day2=" + day2_date + " batch_start_date=" + batch_start_date;
+}
+else
+{
+	mlm_records = zoho.crm.searchRecords("Meeting_Link_Manager","(Course_Name:equals:Iron Lady Leadership Masterclass)",1,200);
+	for each  rec in mlm_records
+	{
+		d2_dt = rec.get("Day_2_Date_and_Time");
+		if(d2_dt != null)
+		{
+			d2_date = d2_dt.toString().subString(0,10);
+			if(d2_date == todayStr)
+			{
+				d1_dt = rec.get("Day_1_Date_and_Time");
+				if(d1_dt != null)
+				{
+					batch_start_date = d1_dt.toString().subString(0,10);
+				}
+				break;
+			}
+		}
+	}
+}
+if(batch_start_date == "")
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com,yaswanthgrandhi2580@gmail.com"
+		subject :"MC Completed - No batch found"
+		message :"No batch with Day 2 date = " + todayStr + " found in Meeting Link Manager"
+	]
+	return "no_batch";
+}
+allLeads = zoho.crm.searchRecords("Leads","(Lead_Status:equals:MC Enrolled)AND(Payment_Status:equals:Completed)",1,200);
+if(allLeads == null)
+{
+	allLeads = List();
+}
+info "Page 1 count: " + allLeads.size();
+if(allLeads.size() == 200)
+{
+	pageTwo = zoho.crm.searchRecords("Leads","(Lead_Status:equals:MC Enrolled)AND(Payment_Status:equals:Completed)",2,200);
+	if(pageTwo != null && pageTwo.size() > 0)
+	{
+		allLeads.addAll(pageTwo);
+		info "Page 2 count: " + pageTwo.size();
+	}
+	if(pageTwo != null && pageTwo.size() == 200)
+	{
+		pageThree = zoho.crm.searchRecords("Leads","(Lead_Status:equals:MC Enrolled)AND(Payment_Status:equals:Completed)",3,200);
+		if(pageThree != null && pageThree.size() > 0)
+		{
+			allLeads.addAll(pageThree);
+			info "Page 3 count: " + pageThree.size();
+		}
+	}
+}
+info "Total leads fetched: " + allLeads.size();
+matchedLeads = List();
+for each  lead in allLeads
+{
+	leadDate = lead.get("MC_Start_Date_Time");
+	if(leadDate != null)
+	{
+		dateStr = leadDate.toString().subString(0,10);
+		if(dateStr == batch_start_date)
+		{
+			matchedLeads.add(lead);
+		}
+	}
+}
+info "Matched leads count: " + matchedLeads.size();
+if(matchedLeads.size() == 0)
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com,yaswanthgrandhi2580@gmail.com"
+		subject :"MC Completed - No leads found"
+		message :"No MC Enrolled leads found for batch: " + batch_start_date
+	]
+	return "no_leads";
+}
+// Default transition_id from first lead (fast path for majority on same blueprint).
+// On "invalid transition", re-fetch THIS lead's blueprint and retry with its own transition_id.
+transitionId = "";
+firstId = matchedLeads.get(0).get("id");
+bpData = invokeurl
+[
+	url :"https://www.zohoapis.in/crm/v2/Leads/" + firstId + "/actions/blueprint"
+	type :GET
+	connection:"zohocrmblueprint"
+];
+bpBlueprint = bpData.get("blueprint");
+if(bpBlueprint == null)
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com,yaswanthgrandhi2580@gmail.com"
+		subject :"MC Completed - Blueprint API error"
+		message :"Blueprint GET failed for lead: " + firstId + ". Response: " + bpData.toString()
+	]
+	return "blueprint_error";
+}
+transitions = bpBlueprint.get("transitions");
+for each  t in transitions
+{
+	if(t.get("name") == "MC Completed")
+	{
+		transitionId = t.get("id");
+	}
+}
+if(transitionId == "")
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com,yaswanthgrandhi2580@gmail.com"
+		subject :"MC Completed - No transition found"
+		message :"No MC Completed transition available for lead: " + firstId + " batch: " + batch_start_date
+	]
+	return "no_transition";
+}
+successCount = 0;
+failedCount = 0;
+retryOkCount = 0;
+for each  lead in matchedLeads
+{
+	leadId = lead.get("id").toLong();
+	day1 = lead.get("Day_1_Attendance");
+	day2 = lead.get("Day_2_Attendance");
+	city = lead.get("City");
+	state = lead.get("State");
+	notes = lead.get("Notes");
+	if(day1 == null || day1 == "-None-")
+	{
+		day1 = "No";
+	}
+	if(day2 == null || day2 == "-None-")
+	{
+		day2 = "No";
+	}
+	if(city == null || city == "-None-" || city.trim() == "")
+	{
+		city = "Please Check With The Participant";
+	}
+	if(state == null || state == "-None-" || state.trim() == "")
+	{
+		state = "Please Check With The Participant";
+	}
+	// Notes is mandatory on MC Completed blueprint transition
+	if(notes == null || notes == "-None-" || notes.toString().trim() == "")
+	{
+		notes = "MC Completed via attendance automation. Batch: " + batch_start_date + ". Day1=" + day1 + ", Day2=" + day2;
+	}
+	else
+	{
+		notes = notes.toString();
+	}
+	// Escape quotes so JSON does not break
+	citySafe = city.replaceAll("\"","'");
+	stateSafe = state.replaceAll("\"","'");
+	notesSafe = notes.replaceAll("\"","'").replaceAll("\n"," ");
+	leadTransitionId = transitionId;
+	singleBody = "{\"blueprint\":[{\"transition_id\":\"" + leadTransitionId + "\",\"data\":{\"Day_1_Attendance\":\"" + day1 + "\",\"Day_2_Attendance\":\"" + day2 + "\",\"City\":\"" + citySafe + "\",\"State\":\"" + stateSafe + "\",\"Notes\":\"" + notesSafe + "\"}}]}";
+	singleResp = invokeurl
+	[
+		url :"https://www.zohoapis.in/crm/v2/Leads/" + leadId + "/actions/blueprint"
+		type :PUT
+		parameters:singleBody
+		connection:"zohocrmblueprint"
+	];
+	if(singleResp.get("status") == "success")
+	{
+		successCount = successCount + 1;
+	}
+	else
+	{
+		errMsg = "";
+		if(singleResp.get("message") != null)
+		{
+			errMsg = singleResp.get("message").toString().toLowerCase();
+		}
+		// Different blueprint process/version → fetch this lead's own MC Completed transition and retry once
+		if(errMsg.contains("invalid transition"))
+		{
+			info "Retrying lead " + leadId + " with per-lead transition_id";
+			leadBpData = invokeurl
+			[
+				url :"https://www.zohoapis.in/crm/v2/Leads/" + leadId + "/actions/blueprint"
+				type :GET
+				connection:"zohocrmblueprint"
+			];
+			leadTransitionId = "";
+			leadBp = leadBpData.get("blueprint");
+			if(leadBp != null)
+			{
+				leadTransitions = leadBp.get("transitions");
+				for each  lt in leadTransitions
+				{
+					if(lt.get("name") == "MC Completed")
+					{
+						leadTransitionId = lt.get("id");
+					}
+				}
+			}
+			if(leadTransitionId != "")
+			{
+				// Cache for subsequent leads on the same alternate blueprint
+				transitionId = leadTransitionId;
+				retryBody = "{\"blueprint\":[{\"transition_id\":\"" + leadTransitionId + "\",\"data\":{\"Day_1_Attendance\":\"" + day1 + "\",\"Day_2_Attendance\":\"" + day2 + "\",\"City\":\"" + citySafe + "\",\"State\":\"" + stateSafe + "\",\"Notes\":\"" + notesSafe + "\"}}]}";
+				retryResp = invokeurl
+				[
+					url :"https://www.zohoapis.in/crm/v2/Leads/" + leadId + "/actions/blueprint"
+					type :PUT
+					parameters:retryBody
+					connection:"zohocrmblueprint"
+				];
+				if(retryResp.get("status") == "success")
+				{
+					successCount = successCount + 1;
+					retryOkCount = retryOkCount + 1;
+					info "Retry OK lead " + leadId;
+				}
+				else
+				{
+					failedCount = failedCount + 1;
+					info "Failed lead " + leadId + " after retry: " + retryResp.toString();
+				}
+			}
+			else
+			{
+				failedCount = failedCount + 1;
+				info "Failed lead " + leadId + ": no MC Completed transition on this lead. First error: " + singleResp.toString();
+			}
+		}
+		else
+		{
+			failedCount = failedCount + 1;
+			info "Failed lead " + leadId + ": " + singleResp.toString();
+		}
+	}
+}
+info "Retry recovered: " + retryOkCount;
+sendmail
+[
+	from :zoho.loginuserid
+	to :"ironladytech@gmail.com,yaswanthgrandhi2580@gmail.com"
+	subject :"MC Completed - " + batch_start_date + " (" + successCount + "/" + matchedLeads.size() + ")"
+	message :"<p>MC Completed update for: <b>" + batch_start_date + "</b></p><p>Total: " + matchedLeads.size() + "<br>Success: " + successCount + "<br>Failed: " + failedCount + "<br>Recovered via per-lead transition retry: " + retryOkCount + "</p>"
+]
+return "success";
+}

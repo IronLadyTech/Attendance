@@ -1,6 +1,6 @@
 // Zoho Flow — 100BM joiners who left before T+15 checkpoint
 // Signature: void mark_100bm_attendance_lookup(string participant_email, string participant_name, string meeting_topic, string session_date)
-// If eligible CRM lead found → skip (batch first_check marks No)
+// If CRM lead found by email/name (any FT_Invite_Date) → skip sheet (they are a known lead)
 // If NOT found → log to unmatched sheet
 // Connection: zoho_flow_to_zoho_crm + zoho_sheet_mc
 //
@@ -22,28 +22,13 @@ if(session_date == null || session_date.trim() == "" || session_date == "null")
 {
 	return;
 }
-session_ddMMyyyy = session_date.subString(8,10) + "-" + session_date.subString(5,7) + "-" + session_date.subString(0,4);
 lead_list = List();
 if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
 {
 	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")",1,5);
 	if(ls != null && ls.size() > 0)
 	{
-		for each cand in ls
-		{
-			inviteDate = cand.get("FT_Invite_Date");
-			if(inviteDate != null)
-			{
-				dateYMD = inviteDate.toString("yyyy-MM-dd");
-				dateDMY = inviteDate.toString("dd-MM-yyyy");
-				rawDate = inviteDate.toString();
-				if(dateYMD == session_date || dateDMY == session_ddMMyyyy || rawDate.contains(session_date) || rawDate.contains(session_ddMMyyyy))
-				{
-					lead_list.add(cand);
-					break;
-				}
-			}
-		}
+		lead_list.add(ls.get(0));
 	}
 }
 if(lead_list == null || lead_list.size() == 0)
@@ -75,34 +60,15 @@ if(lead_list == null || lead_list.size() == 0)
 				name_tc = clean_name.substring(0,1).toUpperCase() + clean_name.substring(1).toLowerCase();
 				lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + name_tc + ")",1,5);
 			}
-			if(lead_list != null && lead_list.size() > 0)
-			{
-				filtered = List();
-				for each cand in lead_list
-				{
-					inviteDate = cand.get("FT_Invite_Date");
-					if(inviteDate != null)
-					{
-						dateYMD = inviteDate.toString("yyyy-MM-dd");
-						dateDMY = inviteDate.toString("dd-MM-yyyy");
-						rawDate = inviteDate.toString();
-						if(dateYMD == session_date || dateDMY == session_ddMMyyyy || rawDate.contains(session_date) || rawDate.contains(session_ddMMyyyy))
-						{
-							filtered.add(cand);
-						}
-					}
-				}
-				lead_list = filtered;
-			}
 		}
 	}
 }
 if(lead_list != null && lead_list.size() > 0)
 {
-	info "100BM LOOKUP: eligible lead found id=" + lead_list.get(0).get("id") + " — batch first_check will mark No";
+	info "100BM LOOKUP: CRM lead found id=" + lead_list.get(0).get("id") + " — not a guest (invite may differ from session)";
 	return;
 }
-info "100BM LOOKUP: no eligible lead — adding to unmatched sheet";
+info "100BM LOOKUP: no CRM lead — adding to unmatched sheet";
 safe_name = "";
 if(participant_name != null)
 {

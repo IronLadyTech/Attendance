@@ -3,8 +3,10 @@
 //   check_type = "first"  → T+15: blank → No (sales calls)
 //   check_type = "final"  → T+30 safety: blank + in room → Yes; blank + never joined → Absent; dropout → No
 //   check_type = "hour"   → T+60 late opportunity: in room + No/Absent → Yes; not in room → unchanged
-// Eligibility: FT_Invite_Date matches session_date (no Payment_Status filter)
-// FT_attended_date is set only when FT_attendance becomes Yes; cleared on No/Absent.
+// Eligibility for batch No/Absent: FT_Invite_Date = session (today's invitees only).
+// Anyone in Zoom (present_emails) is marked Yes + FT_attended_date by email — invite date ignored.
+// FT_Invite_Date is NEVER changed.
+// FT_attended_date = session_date (or today) on Yes / No / Absent — always set when status is written.
 // Connection: zoho_flow_to_zoho_crm
 //
 // Flow mapping (attendance.first_check branch):
@@ -40,18 +42,22 @@ if(check_type != "first" && check_type != "final" && check_type != "hour")
 	info "100BM checkpoint: invalid check_type=" + check_type;
 	return;
 }
-invite_date = session_date;
-if(invite_date == null || invite_date.trim() == "" || invite_date == "null")
+// session_att_date = actual session day written to FT_attended_date on Yes
+session_att_date = session_date;
+if(session_att_date == null || session_att_date.trim() == "" || session_att_date == "null")
 {
-	if(start_time == null || start_time.trim() == "" || start_time == "null")
+	if(start_time != null && start_time.trim() != "" && start_time != "null")
 	{
-		info "100BM checkpoint: session_date and start_time missing";
-		return;
+		session_att_date = start_time.substring(0,10);
 	}
-	invite_date = start_time.substring(0,10);
+	else
+	{
+		session_att_date = zoho.currenttime.toString("yyyy-MM-dd");
+	}
 }
+invite_date = session_att_date;
 invite_ddMMyyyy = invite_date.subString(8,10) + "-" + invite_date.subString(5,7) + "-" + invite_date.subString(0,4);
-info "100BM checkpoint: type=" + check_type + " invite_date=" + invite_date;
+info "100BM checkpoint: type=" + check_type + " session_att_date=" + session_att_date + " invite_cohort=" + invite_date;
 // Eligibility: FT_Invite_Date = session date (no Payment_Status filter). Search by date then
 // verify in-memory. 10 pages x 200 keeps the function under the 30s limit.
 searchCriteria = "(FT_Invite_Date:equals:" + invite_date + ")";
@@ -104,12 +110,13 @@ for each lead in allLeads
 				if(ftBlank)
 				{
 					recMap.put("FT_attendance","No");
+					recMap.put("FT_attended_date",session_att_date);
 					needsUpdate = true;
 				}
 			}
 			else if(check_type == "hour")
 			{
-				// T+60 — upgrade only: in room at 1hr + No/Absent → Yes (+ attended date)
+				// T+60 — upgrade only: in room at 1hr + No/Absent → Yes (+ attended date = session)
 				inPresent = false;
 				leadEmail = lead.get("Email");
 				if(leadEmail != null && leadEmail.trim() != "" && leadEmail != "null")
@@ -133,12 +140,14 @@ for each lead in allLeads
 					}
 					if(cur == "Yes")
 					{
-						// unchanged
+						// Refresh attendance date to this session date
+						recMap.put("FT_attended_date",session_att_date);
+						needsUpdate = true;
 					}
 					else if(cur == "No" || cur == "Absent" || ftBlank)
 					{
 						recMap.put("FT_attendance","Yes");
-						recMap.put("FT_attended_date",invite_date);
+						recMap.put("FT_attended_date",session_att_date);
 						needsUpdate = true;
 					}
 				}
@@ -177,17 +186,17 @@ for each lead in allLeads
 					if(inPresent)
 					{
 						recMap.put("FT_attendance","Yes");
-						recMap.put("FT_attended_date",invite_date);
+						recMap.put("FT_attended_date",session_att_date);
 					}
 					else if(inEverJoined)
 					{
 						recMap.put("FT_attendance","No");
-						recMap.put("FT_attended_date",null);
+						recMap.put("FT_attended_date",session_att_date);
 					}
 					else
 					{
 						recMap.put("FT_attendance","Absent");
-						recMap.put("FT_attended_date",null);
+						recMap.put("FT_attended_date",session_att_date);
 					}
 					needsUpdate = true;
 				}
@@ -200,13 +209,13 @@ for each lead in allLeads
 					if(inPresent)
 					{
 						recMap.put("FT_attendance","Yes");
-						recMap.put("FT_attended_date",invite_date);
+						recMap.put("FT_attended_date",session_att_date);
 						needsUpdate = true;
 					}
 					else if(!inEverJoined)
 					{
 						recMap.put("FT_attendance","Absent");
-						recMap.put("FT_attended_date",null);
+						recMap.put("FT_attended_date",session_att_date);
 						needsUpdate = true;
 					}
 				}
@@ -222,6 +231,66 @@ for each lead in allLeads
 		}
 	}
 }
+// --- Anyone in Zoom: Yes + attended date by email (ignore invite date / makeup) ---
+makeupCount = 0;
+if(check_type == "final" || check_type == "hour" || check_type == "first")
+{
+	if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+	{
+		presentList = present_emails.toLowerCase().trim().toList(",");
+		updateIds = ",";
+		for each um in updateList
+		{
+			updateIds = updateIds + um.get("id").toString() + ",";
+		}
+		for each pe in presentList
+		{
+			em = pe.trim();
+			if(em == "")
+			{
+				continue;
+			}
+			foundLeads = zoho.crm.searchRecords("Leads","(Email:equals:" + em + ")",1,5);
+			if(foundLeads != null && foundLeads.size() > 0)
+			{
+				fLead = foundLeads.get(0);
+				fId = fLead.get("id").toString();
+				if(updateIds.contains("," + fId + ","))
+				{
+					// Already queued — ensure Yes + attended date on existing map
+					for each um in updateList
+					{
+						if(um.get("id").toString() == fId)
+						{
+							um.put("FT_attendance","Yes");
+							um.put("FT_attended_date",session_att_date);
+						}
+					}
+				}
+				else
+				{
+					fAtt = fLead.get("FT_attendance");
+					fCur = "";
+					if(fAtt != null)
+					{
+						fCur = fAtt.toString().trim();
+					}
+					// Always set Yes + session attended date for anyone present (any invite date)
+					recMap = Map();
+					recMap.put("id",fId);
+					recMap.put("FT_attendance","Yes");
+					recMap.put("FT_attended_date",session_att_date);
+					updateList.add(recMap);
+					updateIds = updateIds + fId + ",";
+					makeupCount = makeupCount + 1;
+					matchedCount = matchedCount + 1;
+					info "100BM present-by-email Yes: " + em + " id=" + fId + " was=" + fCur + " invite=" + fLead.get("FT_Invite_Date");
+				}
+			}
+		}
+	}
+}
+info "100BM present-by-email extras queued: " + makeupCount;
 // bulkUpdate allows max 100 records per call — send in groups of 100
 updatedCount = 0;
 failedCount = 0;

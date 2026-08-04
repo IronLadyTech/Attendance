@@ -2,6 +2,9 @@
 // Signature: void mark_100bm_attendance_no(string meeting_id, string participant_email, string participant_name, string meeting_topic, string session_date)
 // Connection: zoho_flow_to_zoho_crm
 //
+// Match lead by email/name (any FT_Invite_Date). FT_Invite_Date is NEVER changed.
+// On No: FT_attended_date = session_date (Attendance Date always set when status is processed).
+//
 // Flow mapping (attendance.mark_no branch):
 //   meeting_id        = ${webhookTrigger.payload.meeting_id}
 //   participant_email = ${webhookTrigger.payload.participant_email}
@@ -28,33 +31,14 @@ if(session_date == null || session_date.trim() == "" || session_date == "null")
 	info "100BM NO: session_date missing - skipping";
 	return;
 }
-session_ddMMyyyy = session_date.subString(8,10) + "-" + session_date.subString(5,7) + "-" + session_date.subString(0,4);
 lead_list = List();
-// --- Find lead: email first ---
+// --- Find lead by email (any invite date) ---
 if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
 {
 	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")",1,5);
 	if(ls != null && ls.size() > 0)
 	{
-		matchedLead = null;
-		for each cand in ls
-		{
-			inviteDate = cand.get("FT_Invite_Date");
-			if(inviteDate != null)
-			{
-				dateYMD = inviteDate.toString("yyyy-MM-dd");
-				dateDMY = inviteDate.toString("dd-MM-yyyy");
-				rawDate = inviteDate.toString();
-				if(dateYMD == session_date || dateDMY == session_ddMMyyyy || rawDate.contains(session_date) || rawDate.contains(session_ddMMyyyy))
-				{
-					matchedLead = cand;
-				}
-			}
-		}
-		if(matchedLead != null)
-		{
-			lead_list.add(matchedLead);
-		}
+		lead_list.add(ls.get(0));
 	}
 }
 // --- Name fallback ---
@@ -87,25 +71,6 @@ if(lead_list == null || lead_list.size() == 0)
 				name_tc = clean_name.substring(0,1).toUpperCase() + clean_name.substring(1).toLowerCase();
 				lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + name_tc + ")",1,5);
 			}
-			if(lead_list != null && lead_list.size() > 0)
-			{
-				filtered = List();
-				for each cand in lead_list
-				{
-					inviteDate = cand.get("FT_Invite_Date");
-					if(inviteDate != null)
-					{
-						dateYMD = inviteDate.toString("yyyy-MM-dd");
-						dateDMY = inviteDate.toString("dd-MM-yyyy");
-						rawDate = inviteDate.toString();
-						if(dateYMD == session_date || dateDMY == session_ddMMyyyy || rawDate.contains(session_date) || rawDate.contains(session_ddMMyyyy))
-						{
-							filtered.add(cand);
-						}
-					}
-				}
-				lead_list = filtered;
-			}
 		}
 	}
 }
@@ -123,12 +88,25 @@ if(lead.get("FT_attendance") != null)
 }
 if(existing == "No")
 {
-	info "100BM NO: already No - skip";
+	attended_date = session_date;
+	if(attended_date == null || attended_date.trim() == "" || attended_date == "null")
+	{
+		attended_date = zoho.currenttime.toString("yyyy-MM-dd");
+	}
+	update_map = Map();
+	update_map.put("FT_attended_date",attended_date);
+	zoho.crm.updateRecord("Leads",lead_id,update_map);
+	info "100BM NO: already No — refreshed FT_attended_date=" + attended_date;
 	return;
+}
+attended_date = session_date;
+if(attended_date == null || attended_date.trim() == "" || attended_date == "null")
+{
+	attended_date = zoho.currenttime.toString("yyyy-MM-dd");
 }
 update_map = Map();
 update_map.put("FT_attendance","No");
-update_map.put("FT_attended_date",null);
+update_map.put("FT_attended_date",attended_date);
 zoho.crm.updateRecord("Leads",lead_id,update_map);
-info "100BM MARKED NO: lead=" + lead_id + " FT_attendance=No FT_attended_date=cleared was=" + existing;
+info "100BM MARKED NO: lead=" + lead_id + " FT_attendance=No FT_attended_date=" + attended_date + " was=" + existing + " session=" + session_date;
 }
