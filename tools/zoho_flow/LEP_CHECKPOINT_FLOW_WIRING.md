@@ -1,61 +1,53 @@
 # LEP Checkpoint Attendance — Zoho Flow Wiring
 
-**IL LEP Sessions - 1 & 2 Days** — majority of 3 in-room checks → **Present** / **Absent**.
+**IL LEP Sessions - 1 & 2 Days** — CRM updated at **every check** (1, 2, 3) and **final majority** (4).
 
 Wire a separate **LEP_Attendance** Flow (not Mc_Attendance or 100BM_Attendance).
 
-## Matching rule (important)
-
-**Email or name only** — no batch date, no `LEP_Start_Date`, no Lead Status filter.
-
-Previous-batch participants often join the current session; marking is only for people **actually in the Zoom meeting** at checkpoints. The bridge sends one update per participant who joined at least once.
-
-## Zoom app (LEP account)
-
-Enable event subscriptions:
-
-- `meeting.started`
-- `meeting.participant_joined`
-- `meeting.participant_left`
-- `meeting.ended` (optional — bridge cancels timers only; no CRM action)
-
-Webhook endpoint: bridge **`POST /lep`** with `ZOOM_WEBHOOK_SECRET_TOKEN_LEP`.
-
-## Recommended Zoom topics
-
-| Session | Example topic |
-|---------|-----------------|
-| Day 1 | `IL LEP Sessions - 1 & 2 Days - Day 1` |
-| Day 2 | `IL LEP Sessions - 1 & 2 Days - Day 2` |
-
-If topic has no `Day 2` hint, bridge treats it as **Day 1**.
-
-## Checkpoint schedule (9:00 AM IST anchor)
+## Schedule
 
 | Day | Check 1 | Check 2 | Check 3 | Final (majority) |
 |-----|---------|---------|---------|------------------|
-| Day 1 | 9:15 AM | 3:30 PM | 6:15 PM | 6:30 PM |
-| Day 2 | 9:15 AM | 12:30 PM | 4:15 PM | 4:30 PM |
+| Day 1 (Sat) | 9:15 AM | 3:30 PM | 6:15 PM | 6:30 PM |
+| Day 2 (Sun) | 9:15 AM | 12:30 PM | 4:15 PM | 4:30 PM |
 
-At each check: **Present** = in Zoom room; **Absent** = not in room.
+Saturday = Day 1. Sunday = Day 2. `batch_date` = Saturday reg date (Day 2 uses session date − 1, same as MC).
 
-At final: **2+ Present → Present**; tie or **2+ Absent → Absent**.
+## What updates when
 
-## Decision branches
+| When | Bridge event | CRM update |
+|------|--------------|------------|
+| Check 1, 2, 3 | `attendance.lep_check` | Each person in meeting → Present/Absent |
+| Check 1, 2, 3 | `attendance.lep_batch_check` | Cohort not in room → **Absent** (sales calls) |
+| Final | `attendance.lep_final` | Majority Present/Absent (overwrites field) |
+
+**One function** handles all three events: `mark_lep_attendance_final`.
+
+## Decision branches (top to bottom)
 
 | Condition | Event | Action |
 |-----------|-------|--------|
-| condition1 | `attendance.lep_final` | `mark_lep_attendance_final` |
-| Default | `meeting.ended`, etc. | *(no action)* |
+| condition1 | `attendance.lep_check` | `mark_lep_attendance_final` |
+| condition2 | `attendance.lep_batch_check` | `mark_lep_attendance_final` |
+| condition3 | `attendance.lep_final` | `mark_lep_attendance_final` |
+| Default | other | *(no action)* |
 
-## CRM fields
+## CRM module & fields
 
-| UI label | API name | Values |
-|----------|----------|--------|
-| LEP Day 1 Session | `LEP_Day_1_Session` | Present / Absent |
-| LEP Day 2 Session | `LEP_Day_2_Session` | Present / Absent |
+**Module:** `Session_Attendance` (Session Attendance — not Leads)
 
-## Parameter mapping — mark_lep_attendance_final
+| Field (UI) | API name |
+|------------|----------|
+| Email | `Email` |
+| Lead Email | `Lead_Email` |
+| Lead Full Name | `Name` |
+| LEP Start Date | `LEP_Start_Date` → Saturday batch (cohort) |
+| LEP Day 1 Session | `LEP_Day_1_Session` → Present / Absent |
+| LEP Day 2 Session | `LEP_Day_2_Session` → Present / Absent |
+
+## Parameter mapping — all branches use same function
+
+### lep_check / lep_final
 
 | Param | Value |
 |-------|--------|
@@ -64,15 +56,39 @@ At final: **2+ Present → Present**; tie or **2+ Absent → Absent**.
 | meeting_topic | `${webhookTrigger.payload.meeting_topic}` |
 | session_date | `${webhookTrigger.payload.session_date}` |
 | session_day | `${webhookTrigger.payload.session_day}` |
+| batch_date | `${webhookTrigger.payload.batch_date}` |
+| check_number | `${webhookTrigger.payload.check_number}` |
+| present_emails | *(leave blank)* |
 | attendance_result | `${webhookTrigger.payload.attendance_result}` |
 
-## Render / bridge env
+### lep_batch_check
+
+| Param | Value |
+|-------|--------|
+| participant_email | *(leave blank)* |
+| participant_name | *(leave blank)* |
+| meeting_topic | `${webhookTrigger.payload.meeting_topic}` |
+| session_date | `${webhookTrigger.payload.session_date}` |
+| session_day | `${webhookTrigger.payload.session_day}` |
+| batch_date | `${webhookTrigger.payload.batch_date}` |
+| check_number | `${webhookTrigger.payload.check_number}` |
+| present_emails | `${webhookTrigger.payload.present_emails}` |
+| attendance_result | *(leave blank)* |
+
+## Record matching
+
+**Individual:** `LEP_Start_Date` = batch first; else any match on `Email` / `Lead_Email` / `Name`.
+
+**Batch (sales):** `LEP_Start_Date` = batch, `Email` or `Lead_Email` **not** in `present_emails` → Absent.
+
+## Render
 
 | Variable | Purpose |
 |----------|---------|
-| `ZOOM_WEBHOOK_SECRET_TOKEN_LEP` | Zoom secret for `/lep` |
-| `ZOHO_WEBHOOK_FORWARD_URL_LEP` | LEP Zoho Flow webhook URL |
+| `ZOOM_WEBHOOK_SECRET_TOKEN_LEP` | Zoom `/lep` |
+| `ZOHO_WEBHOOK_FORWARD_URL_LEP` | This Flow webhook |
+| `BRIDGE_STATE_PATH` | Persist roster/checks across restarts |
 
-## No Day 2 completion
+## No Day 2 blueprint
 
-Unlike MC, LEP does **not** run a blueprint / “Completed” transition when the meeting ends.
+LEP does not run MC Completed–style blueprint on meeting end.

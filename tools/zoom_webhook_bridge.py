@@ -20,8 +20,8 @@ MC route (POST /):
 LEP route (POST /lep) — IL LEP Sessions (majority of 3 checks, 9:00 AM anchor):
   - meeting.started → schedule 4 sweeps (check1, check2, check3, final majority)
   - meeting.participant_joined / left → maintain roster
-  - sweeps 1–3 → record Present/Absent per participant (in room at check time)
-  - sweep 4 (final) → majority → attendance.lep_final per participant in meeting
+  - sweeps 1–3 → attendance.lep_check (each participant) + lep_batch_check (cohort absent)
+  - sweep 4 (final) → majority → attendance.lep_final
   - meeting.ended → cancel timers only (no CRM completion)
 
 Environment variables required:
@@ -39,6 +39,8 @@ Optional:
   BM100_CHECKPOINT_3_SECONDS (default 3600 = 60 min, 100BM route)
   ZOOM_WEBHOOK_SECRET_TOKEN_LEP, ZOHO_WEBHOOK_FORWARD_URL_LEP (LEP route /lep)
   LEP day offsets are fixed from 9:00 AM IST anchor (see _LEP_DELAYS_DAY1 / _LEP_DELAYS_DAY2)
+  BRIDGE_STATE_PATH (default /tmp/bridge_meetings.json) — persist roster/checks across restarts
+  BRIDGE_STATE_PERSIST=0 to disable file persistence
 """
 from __future__ import annotations
 
@@ -62,6 +64,7 @@ if _TOOLS_DIR not in sys.path:
     sys.path.insert(0, _TOOLS_DIR)
 
 from zoho_crm_mlm import resolve_checkpoint_anchor  # noqa: E402
+from bridge_state_persist import load_meetings, persist_enabled, persist_path, save_meetings  # noqa: E402
 
 # MC checkpoint delays from actual Zoom meeting start
 _MC_CHECKPOINT_1 = int(os.environ.get("MC_CHECKPOINT_1_SECONDS", "900"))   # T+15
@@ -102,6 +105,68 @@ _lep_meetings: dict[str, dict] = {}
 _lep_lock = threading.Lock()
 
 
+def _bridge_persist() -> None:
+    """Write MC / 100BM / LEP meeting state to disk (survives Render restarts)."""
+    if not persist_enabled():
+        return
+    snap_mc: dict[str, dict] = {}
+    snap_100bm: dict[str, dict] = {}
+    snap_lep: dict[str, dict] = {}
+    with _mc_lock:
+        snap_mc = dict(_mc_meetings)
+    with _100bm_lock:
+        snap_100bm = dict(_100bm_meetings)
+    with _lep_lock:
+        snap_lep = dict(_lep_meetings)
+    save_meetings(snap_mc, snap_100bm, snap_lep)
+
+
+def _bridge_restore_and_reschedule(
+    forward_url: str,
+    forward_url_100bm: str,
+    forward_url_lep: str,
+) -> None:
+    """Load persisted meetings and reschedule remaining checkpoint timers."""
+    global _mc_meetings, _100bm_meetings, _lep_meetings
+    loaded_mc, loaded_100bm, loaded_lep = load_meetings()
+    if not loaded_mc and not loaded_100bm and not loaded_lep:
+        return
+
+    with _mc_lock:
+        for mid, state in loaded_mc.items():
+            state["forward_url"] = forward_url
+            state["timers"] = []
+            _mc_meetings[mid] = state
+            _mc_schedule_checkpoints(mid, state)
+            sys.stderr.write(
+                f"[persist] Restored MC meeting={mid} roster={len(state.get('roster', {}))} "
+                f"ever_joined={len(state.get('ever_joined', {}))}\n"
+            )
+
+    with _100bm_lock:
+        for mid, state in loaded_100bm.items():
+            state["forward_url"] = forward_url_100bm or forward_url
+            state["timers"] = []
+            _100bm_meetings[mid] = state
+            _100bm_schedule_checkpoints(mid, state)
+            sys.stderr.write(
+                f"[persist] Restored 100BM meeting={mid} roster={len(state.get('roster', {}))} "
+                f"ever_joined={len(state.get('ever_joined', {}))}\n"
+            )
+
+    with _lep_lock:
+        for mid, state in loaded_lep.items():
+            state["forward_url"] = forward_url_lep or forward_url
+            state["timers"] = []
+            _lep_meetings[mid] = state
+            _lep_schedule_checkpoints(mid, state)
+            checks = state.get("check_results", {})
+            sys.stderr.write(
+                f"[persist] Restored LEP meeting={mid} roster={len(state.get('roster', {}))} "
+                f"ever_joined={len(state.get('ever_joined', {}))} check_results={len(checks)}\n"
+            )
+
+
 def _load_dotenv() -> None:
     try:
         from dotenv import load_dotenv
@@ -124,11 +189,22 @@ def _is_lep_topic(topic: str) -> bool:
     return _LEP_TOPIC_KEYWORD in topic.lower()
 
 
-def _lep_session_day(topic: str) -> str:
-    """Day 2 if topic contains 'day 2' / 'day2'; else Day 1."""
+def _lep_session_day(topic: str, session_date: str = "") -> str:
+    """Day 1 = Saturday; Day 2 = Sunday. Topic hint overrides weekday."""
     topic_l = topic.lower()
     if "day 2" in topic_l or "day2" in topic_l or "session 2" in topic_l:
         return "Day 2"
+    if "day 1" in topic_l or "day1" in topic_l or "session 1" in topic_l:
+        return "Day 1"
+    if session_date:
+        try:
+            wd = datetime.strptime(session_date, "%Y-%m-%d").date().weekday()
+            if wd == 5:
+                return "Day 1"
+            if wd == 6:
+                return "Day 2"
+        except ValueError:
+            pass
     return "Day 1"
 
 
@@ -481,6 +557,7 @@ def _handle_meeting_started(body: dict, forward_url: str) -> None:
         f"session={session_date} batch={batch} roster={len(roster)} "
         f"anchor={state.get('checkpoint_anchor_source', '?')}\n"
     )
+    _bridge_persist()
 
 
 def _handle_mc_participant_joined(body: dict, forward_url: str) -> None:
@@ -541,6 +618,7 @@ def _handle_mc_participant_joined(body: dict, forward_url: str) -> None:
         state.setdefault("ever_joined", {})[rkey] = pinfo
 
     sys.stderr.write(f"[join/mc] Roster +1 {email or name} meeting={meeting_id}\n")
+    _bridge_persist()
 
 
 def _handle_mc_participant_left(body: dict) -> None:
@@ -566,6 +644,7 @@ def _handle_mc_participant_left(body: dict) -> None:
                 f"[left/mc] Roster -1 {email or name} meeting={meeting_id} "
                 "(no downgrade; checkpoint decides)\n"
             )
+    _bridge_persist()
 
 
 def _handle_meeting_ended(body: dict, forward_url: str, program: str) -> None:
@@ -603,6 +682,7 @@ def _handle_meeting_ended(body: dict, forward_url: str, program: str) -> None:
         "program": program or "MC",
         "session_date": _session_date_ist(start_time),
     }, "ended")
+    _bridge_persist()
 
 
 # --- 100BM checkpoint model (same T+15 / T+30 as MC) ---
@@ -762,6 +842,7 @@ def _handle_100bm_meeting_started(body: dict, forward_url: str) -> None:
     sys.stderr.write(
         f"[100bm/started] meeting={meeting_id} session={session_date} roster={len(roster)}\n"
     )
+    _bridge_persist()
 
 
 def _handle_100bm_participant_joined(body: dict, forward_url: str) -> None:
@@ -819,6 +900,7 @@ def _handle_100bm_participant_joined(body: dict, forward_url: str) -> None:
         state.setdefault("ever_joined", {})[rkey] = pinfo
 
     sys.stderr.write(f"[100bm/join] Roster +1 {email or name} meeting={meeting_id}\n")
+    _bridge_persist()
 
 
 def _handle_100bm_participant_left(body: dict) -> None:
@@ -844,6 +926,7 @@ def _handle_100bm_participant_left(body: dict) -> None:
                 f"[100bm/left] Roster -1 {email or name} meeting={meeting_id} "
                 "(no downgrade; checkpoint decides)\n"
             )
+    _bridge_persist()
 
 
 # --- LEP checkpoint model (3 samples + majority final) ---
@@ -867,8 +950,47 @@ def _lep_base_payload(state: dict) -> dict:
         "start_time": state["start_time"],
         "session_date": state["session_date"],
         "session_day": state["session_day"],
+        "batch_date": state.get("batch_date") or _batch_date(
+            state.get("session_date", ""),
+            state.get("session_day", "Day 1"),
+        ),
         "program": "LEP",
     }
+
+
+def _lep_mark_check(
+    forward_url: str,
+    state: dict,
+    email: str,
+    name: str,
+    check_number: int,
+    result: str,
+) -> None:
+    payload = _lep_base_payload(state)
+    payload.update({
+        "event": "attendance.lep_check",
+        "participant_email": email,
+        "participant_name": name,
+        "check_number": str(check_number),
+        "attendance_result": result,
+    })
+    _post_to_zoho(forward_url, payload, f"lep-check{check_number}")
+
+
+def _lep_mark_batch_check(
+    forward_url: str,
+    state: dict,
+    check_number: int,
+    roster: dict,
+) -> None:
+    """Cohort LEP Started + LEP_Reg_Date not in room at this check → Absent (sales call list)."""
+    payload = _lep_base_payload(state)
+    payload.update({
+        "event": "attendance.lep_batch_check",
+        "check_number": str(check_number),
+        "present_emails": _roster_email_csv(roster),
+    })
+    _post_to_zoho(forward_url, payload, f"lep-batch-check{check_number}")
 
 
 def _lep_mark_final(
@@ -884,6 +1006,7 @@ def _lep_mark_final(
         "event": "attendance.lep_final",
         "participant_email": email,
         "participant_name": name,
+        "check_number": "final",
         "attendance_result": result,
         "check_1": "Present" if len(checks) > 0 and checks[0] else "Absent",
         "check_2": "Present" if len(checks) > 1 and checks[1] else "Absent",
@@ -919,10 +1042,15 @@ def _lep_sweep(meeting_id: str, sweep: int) -> None:
                 history = st.setdefault("check_results", {}).setdefault(rkey, [])
                 history.append(present)
                 email = info.get("email", "")
+                name = info.get("name", "")
+                result = "Present" if present else "Absent"
                 sys.stderr.write(
-                    f"[lep/sweep{sweep}] check {email or rkey}: "
-                    f"{'Present' if present else 'Absent'}\n"
+                    f"[lep/sweep{sweep}] check {email or rkey}: {result}\n"
                 )
+                if email or name:
+                    _lep_mark_check(forward_url, st, email, name, sweep, result)
+        _lep_mark_batch_check(forward_url, state, sweep, roster)
+        _bridge_persist()
         return
 
     # sweep 4 — final majority
@@ -952,6 +1080,7 @@ def _lep_sweep(meeting_id: str, sweep: int) -> None:
         f"[lep/sweep4] final updates={len(final_results)} "
         f"ever_joined={len(ever_joined)} meeting={meeting_id}\n"
     )
+    _bridge_persist()
 
 
 def _lep_cancel_timers(state: dict) -> None:
@@ -985,7 +1114,7 @@ def _handle_lep_meeting_started(body: dict, forward_url: str) -> None:
     meeting_id = str(obj.get("id", ""))
     start_time = obj.get("start_time", "")
     session_date = _session_date_ist(start_time)
-    session_day = _lep_session_day(topic)
+    session_day = _lep_session_day(topic, session_date)
 
     with _lep_lock:
         existing = _lep_meetings.get(meeting_id)
@@ -1004,6 +1133,7 @@ def _handle_lep_meeting_started(body: dict, forward_url: str) -> None:
             "start_time": start_time,
             "session_date": session_date,
             "session_day": session_day,
+            "batch_date": _batch_date(session_date, session_day),
             "forward_url": forward_url,
             "roster": roster,
             "ever_joined": ever_joined,
@@ -1015,8 +1145,9 @@ def _handle_lep_meeting_started(body: dict, forward_url: str) -> None:
 
     sys.stderr.write(
         f"[lep/started] {session_day} meeting={meeting_id} session={session_date} "
-        f"roster={len(roster)} anchor=9:00IST\n"
+        f"batch={_batch_date(session_date, session_day)} roster={len(roster)} anchor=9:00IST\n"
     )
+    _bridge_persist()
 
 
 def _handle_lep_participant_joined(body: dict, forward_url: str) -> None:
@@ -1041,13 +1172,14 @@ def _handle_lep_participant_joined(body: dict, forward_url: str) -> None:
         state = _lep_meetings.get(meeting_id)
         if state is None:
             session_date = _session_date_ist(join_time or obj.get("start_time", ""))
-            session_day = _lep_session_day(topic)
+            session_day = _lep_session_day(topic, session_date)
             state = {
                 "meeting_id": meeting_id,
                 "topic": topic,
                 "start_time": obj.get("start_time", join_time),
                 "session_date": session_date,
                 "session_day": session_day,
+                "batch_date": _batch_date(session_date, session_day),
                 "forward_url": forward_url,
                 "roster": {},
                 "ever_joined": {},
@@ -1069,6 +1201,7 @@ def _handle_lep_participant_joined(body: dict, forward_url: str) -> None:
         state.setdefault("ever_joined", {})[rkey] = pinfo
 
     sys.stderr.write(f"[lep/join] Roster +1 {email or name} meeting={meeting_id}\n")
+    _bridge_persist()
 
 
 def _handle_lep_participant_left(body: dict) -> None:
@@ -1093,6 +1226,7 @@ def _handle_lep_participant_left(body: dict) -> None:
             sys.stderr.write(
                 f"[lep/left] Roster -1 {email or name} meeting={meeting_id}\n"
             )
+    _bridge_persist()
 
 
 def _handle_lep_meeting_ended(body: dict) -> None:
@@ -1112,6 +1246,7 @@ def _handle_lep_meeting_ended(body: dict) -> None:
         f"[lep/ended] {state.get('session_day', '?') if state else '?'} "
         f"ended — timers cancelled (no CRM completion) meeting={meeting_id}\n"
     )
+    _bridge_persist()
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -1281,6 +1416,8 @@ def make_handler(
                 "active_lep_meetings": active_lep,
                 "route_100bm": bool(self._secret_100bm),
                 "route_lep": bool(self._secret_lep),
+                "bridge_state_persist": persist_enabled(),
+                "bridge_state_path": persist_path(),
                 "mlm_planned_start_enabled": os.environ.get("MC_USE_MLM_PLANNED_START", "1") not in ("0", "false", "no"),
                 "mlm_crm_configured": bool(
                     os.environ.get("ZOHO_CRM_CLIENT_ID", "").strip()
@@ -1318,6 +1455,8 @@ def main() -> None:
     p.add_argument("--port", type=int, default=default_port)
     args = p.parse_args()
 
+    _bridge_restore_and_reschedule(forward, forward_100bm, forward_lep)
+
     handler = make_handler(secret, forward, secret_100bm, forward_100bm, secret_lep, forward_lep)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     route_100bm = "/100bm enabled" if secret_100bm else "/100bm disabled"
@@ -1333,6 +1472,7 @@ def main() -> None:
         f"LEP topic keyword  : {_LEP_TOPIC_KEYWORD}\n"
         f"100BM route        : {route_100bm}\n"
         f"LEP route          : {route_lep}\n"
+        f"State persistence  : {'on → ' + persist_path() if persist_enabled() else 'off'}\n"
         f"Forward URL        : {forward}\n"
         "MC /               : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
         "100BM /100bm       : meeting.started → roster → T+15/T+30/T+60 sweeps\n"

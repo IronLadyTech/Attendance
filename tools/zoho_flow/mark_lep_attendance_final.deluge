@@ -1,121 +1,367 @@
-// Zoho Flow custom function — LEP final attendance (majority of 3 checks)
-// Signature: void mark_lep_attendance_final(string participant_email, string participant_name, string meeting_topic, string session_date, string session_day, string attendance_result)
+// Zoho Flow — LEP attendance at EVERY check (1, 2, 3) and final majority (4)
+// Module: Session_Attendance (not Leads)
+// Signature: void mark_lep_attendance_final(string participant_email, string participant_name, string meeting_topic, string session_date, string session_day, string batch_date, string check_number, string present_emails, string attendance_result)
 // Connection: zoho_flow_to_zoho_crm
 //
-// Match lead by email or name ONLY (no batch / LEP_Start_Date filter — previous-batch
-// participants may join this session). Only people in the Zoom meeting are marked.
-// Updates LEP_Day_1_Session or LEP_Day_2_Session to Present / Absent.
+// CRM fields:
+//   Email, Lead_Email, Name (Lead Full Name), LEP_Start_Date (cohort/batch date),
+//   LEP_Day_1_Session, LEP_Day_2_Session
 //
-// Flow mapping (attendance.lep_final branch):
-//   participant_email  = ${webhookTrigger.payload.participant_email}
-//   participant_name   = ${webhookTrigger.payload.participant_name}
-//   meeting_topic      = ${webhookTrigger.payload.meeting_topic}
-//   session_date       = ${webhookTrigger.payload.session_date}
-//   session_day        = ${webhookTrigger.payload.session_day}
-//   attendance_result  = ${webhookTrigger.payload.attendance_result}
+// Two modes (same function):
+//   A) Individual — participant_email set → lep_check / lep_final
+//   B) Batch — participant_email blank + present_emails set → lep_batch_check
+//      Marks Absent for cohort (LEP_Start_Date = batch) NOT in room (sales calls)
+//
+// Match (individual): cohort first (LEP_Start_Date = batch), else email/name anywhere.
+// Email: tries Email, then Lead_Email. Name: searches Name field.
 
-void mark_lep_attendance_final(string participant_email, string participant_name, string meeting_topic, string session_date, string session_day, string attendance_result)
+void mark_lep_attendance_final(string participant_email, string participant_name, string meeting_topic, string session_date, string session_day, string batch_date, string check_number, string present_emails, string attendance_result)
 {
-info "LEP FINAL: email=" + participant_email + " name=" + participant_name + " day=" + session_day + " result=" + attendance_result + " session=" + session_date;
+moduleName = "Session_Attendance";
+info "LEP: check=" + check_number + " email=" + participant_email + " result=" + attendance_result + " session=" + session_date;
 if(meeting_topic == null || meeting_topic.trim() == "" || meeting_topic == "null")
 {
-	info "LEP FINAL: no meeting topic - skipping";
+	info "LEP: no meeting topic - skipping";
 	return;
 }
 if(!meeting_topic.toLowerCase().contains("il lep sessions"))
 {
-	info "LEP FINAL: unknown topic - skipping: " + meeting_topic;
+	info "LEP: unknown topic - skipping: " + meeting_topic;
 	return;
 }
+fieldName = "LEP_Day_1_Session";
+isDay2 = false;
+if(session_day != null && session_day.toLowerCase().contains("day 2"))
+{
+	fieldName = "LEP_Day_2_Session";
+	isDay2 = true;
+}
+lep_reg_date = batch_date;
+if(lep_reg_date == null || lep_reg_date.trim() == "" || lep_reg_date == "null")
+{
+	lep_reg_date = session_date;
+	if(lep_reg_date == null || lep_reg_date.trim() == "" || lep_reg_date == "null")
+	{
+		lep_reg_date = zoho.currenttime.toString("yyyy-MM-dd");
+	}
+	else
+	{
+		lep_reg_date = lep_reg_date.trim();
+	}
+	if(isDay2)
+	{
+		day2_dt = lep_reg_date.toTime("yyyy-MM-dd");
+		lep_reg_date = (day2_dt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
+	}
+}
+else
+{
+	lep_reg_date = lep_reg_date.trim();
+}
+lep_reg_ddMMyyyy = lep_reg_date.subString(8,10) + "-" + lep_reg_date.subString(5,7) + "-" + lep_reg_date.subString(0,4);
+// --- Batch mode: cohort not in room at this check → Absent ---
+emailBlank = participant_email == null || participant_email.trim() == "" || participant_email == "null";
+if(emailBlank)
+{
+	if(present_emails == null || present_emails.trim() == "" || present_emails == "null")
+	{
+		info "LEP batch: no present_emails - skipping";
+		return;
+	}
+	presentCsv = "," + present_emails.toLowerCase().trim() + ",";
+	allRecords = List();
+	pageNums = {1,2,3,4,5};
+	for each pageNum in pageNums
+	{
+		pageResp = zoho.crm.getRecords(moduleName,pageNum,200);
+		pageRecs = List();
+		if(pageResp != null)
+		{
+			try
+			{
+				wrapped = pageResp.get("data");
+				if(wrapped != null && wrapped.size() > 0)
+				{
+					pageRecs = wrapped;
+				}
+				else
+				{
+					pageRecs = pageResp;
+				}
+			}
+			catch (pageErr)
+			{
+				pageRecs = pageResp;
+			}
+		}
+		if(pageRecs.size() >= 1)
+		{
+			for each pageRec in pageRecs
+			{
+				allRecords.add(pageRec);
+			}
+			if(pageRecs.size() < 200)
+			{
+				break;
+			}
+		}
+		else
+		{
+			break;
+		}
+	}
+	updateList = List();
+	for each rec in allRecords
+	{
+		reg = rec.get("LEP_Start_Date");
+		if(reg == null)
+		{
+			continue;
+		}
+		dateYMD = reg.toString("yyyy-MM-dd");
+		dateDMY = reg.toString("dd-MM-yyyy");
+		rawDate = reg.toString();
+		if(dateYMD != lep_reg_date && dateDMY != lep_reg_ddMMyyyy && !rawDate.contains(lep_reg_date) && !rawDate.contains(lep_reg_ddMMyyyy))
+		{
+			continue;
+		}
+		recEmail = rec.get("Email");
+		if(recEmail == null || recEmail.trim() == "" || recEmail == "null")
+		{
+			recEmail = rec.get("Lead_Email");
+		}
+		if(recEmail == null || recEmail.trim() == "" || recEmail == "null")
+		{
+			continue;
+		}
+		emailL = recEmail.toLowerCase().trim();
+		if(presentCsv.contains("," + emailL + ","))
+		{
+			continue;
+		}
+		recMap = Map();
+		recMap.put("id",rec.get("id"));
+		recMap.put(fieldName,"Absent");
+		updateList.add(recMap);
+	}
+	updatedCount = 0;
+	chunk = List();
+	for each recMap in updateList
+	{
+		chunk.add(recMap);
+		if(chunk.size() == 100)
+		{
+			bulkResp = zoho.crm.bulkUpdate(moduleName,chunk);
+			if(bulkResp != null)
+			{
+				for each row in bulkResp
+				{
+					if(row.get("status") == "success")
+					{
+						updatedCount = updatedCount + 1;
+					}
+				}
+			}
+			chunk = List();
+		}
+	}
+	if(chunk.size() > 0)
+	{
+		bulkResp = zoho.crm.bulkUpdate(moduleName,chunk);
+		if(bulkResp != null)
+		{
+			for each row in bulkResp
+			{
+				if(row.get("status") == "success")
+				{
+					updatedCount = updatedCount + 1;
+				}
+			}
+		}
+	}
+	info "LEP batch check=" + check_number + " cohort=" + lep_reg_date + " absent=" + updatedCount;
+	return;
+}
+// --- Individual mode ---
 if(attendance_result == null || attendance_result.trim() == "" || attendance_result == "null")
 {
-	info "LEP FINAL: attendance_result missing - skipping";
+	info "LEP: attendance_result missing - skipping";
 	return;
 }
 resultVal = attendance_result.trim();
 if(resultVal != "Present" && resultVal != "Absent")
 {
-	info "LEP FINAL: invalid attendance_result=" + resultVal;
+	info "LEP: invalid attendance_result=" + resultVal;
 	return;
 }
-fieldName = "LEP_Day_1_Session";
-if(session_day != null && session_day.toLowerCase().contains("day 2"))
-{
-	fieldName = "LEP_Day_2_Session";
-}
-lead_list = List();
-// --- Find lead by email (any batch) ---
+rec = null;
+matchedCohort = false;
+fallbackRec = null;
 if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
 {
-	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")",1,5);
-	if(ls != null && ls.size() > 0)
+	emailQ = participant_email.trim();
+	emailFields = List();
+	emailFields.add("Email");
+	emailFields.add("Lead_Email");
+	for each emailField in emailFields
 	{
-		lead_list.add(ls.get(0));
-	}
-}
-// --- Name fallback (any batch) ---
-if(lead_list == null || lead_list.size() == 0)
-{
-	if(participant_name != null && participant_name.trim() != "" && participant_name != "null")
-	{
-		clean_name = participant_name.replaceAll("Ms. ","").replaceAll("Mr. ","").replaceAll("Mrs. ","").replaceAll("Dr. ","").replaceAll("Prof. ","").replaceAll("Miss ","").replaceAll("Rev. ","").trim();
-		if(clean_name.length() > 0)
+		if(rec != null)
 		{
-			space_idx = clean_name.indexOf(" ");
-			if(space_idx > 0)
+			break;
+		}
+		ls = zoho.crm.searchRecords(moduleName,"(" + emailField + ":equals:" + emailQ + ")",1,5);
+		scanList = List();
+		if(ls != null)
+		{
+			try
 			{
-				raw_first = clean_name.substring(0,space_idx).trim();
-				last_space_idx = clean_name.lastIndexOf(" ");
-				raw_last = clean_name.substring(last_space_idx + 1).trim();
-				if(raw_first.length() > 1 && raw_last.length() > 1)
+				wrapped = ls.get("data");
+				if(wrapped != null && wrapped.size() > 0)
 				{
-					first_tc = raw_first.substring(0,1).toUpperCase() + raw_first.substring(1).toLowerCase();
-					last_tc = raw_last.substring(0,1).toUpperCase() + raw_last.substring(1).toLowerCase();
-					lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + first_tc + ")and(Last_Name:equals:" + last_tc + ")",1,5);
-					if(lead_list == null || lead_list.size() == 0)
-					{
-						lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + raw_first.toUpperCase() + ")and(Last_Name:equals:" + raw_last.toUpperCase() + ")",1,5);
-					}
-					if(lead_list == null || lead_list.size() == 0)
-					{
-						lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + raw_first.toLowerCase() + ")and(Last_Name:equals:" + raw_last.toLowerCase() + ")",1,5);
-					}
+					scanList = wrapped;
 				}
-				if(lead_list == null || lead_list.size() == 0)
+				else
 				{
-					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name + ")",1,5);
-				}
-				if(lead_list == null || lead_list.size() == 0)
-				{
-					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name.toUpperCase() + ")",1,5);
-				}
-				if(lead_list == null || lead_list.size() == 0)
-				{
-					lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + clean_name.toLowerCase() + ")",1,5);
+					scanList = ls;
 				}
 			}
-			else
+			catch (searchErr)
 			{
-				name_tc = clean_name.substring(0,1).toUpperCase() + clean_name.substring(1).toLowerCase();
-				lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + name_tc + ")",1,5);
-				if(lead_list == null || lead_list.size() == 0)
+				scanList = ls;
+			}
+		}
+		for each cand in scanList
+		{
+			reg = cand.get("LEP_Start_Date");
+			regOk = false;
+			if(reg != null)
+			{
+				dateYMD = reg.toString("yyyy-MM-dd");
+				dateDMY = reg.toString("dd-MM-yyyy");
+				rawDate = reg.toString();
+				if(dateYMD == lep_reg_date || dateDMY == lep_reg_ddMMyyyy || rawDate.contains(lep_reg_date) || rawDate.contains(lep_reg_ddMMyyyy))
 				{
-					lead_list = zoho.crm.searchRecords("Leads","(First_Name:equals:" + name_tc + ")",1,5);
+					regOk = true;
+				}
+			}
+			if(regOk)
+			{
+				rec = cand;
+				matchedCohort = true;
+				break;
+			}
+			if(fallbackRec == null)
+			{
+				fallbackRec = cand;
+			}
+		}
+	}
+	if(rec == null && fallbackRec != null)
+	{
+		rec = fallbackRec;
+	}
+}
+if(rec == null && participant_name != null && participant_name.trim() != "" && participant_name != "null")
+{
+	clean_name = participant_name.replaceAll("Ms. ","").replaceAll("Mr. ","").replaceAll("Mrs. ","").replaceAll("Dr. ","").replaceAll("Prof. ","").replaceAll("Miss ","").replaceAll("Rev. ","").trim();
+	name_candidates = List();
+	if(clean_name.length() > 0)
+	{
+		tmp = zoho.crm.searchRecords(moduleName,"(Name:equals:" + clean_name + ")",1,5);
+		scanList = List();
+		if(tmp != null)
+		{
+			try
+			{
+				wrapped = tmp.get("data");
+				if(wrapped != null && wrapped.size() > 0)
+				{
+					scanList = wrapped;
+				}
+				else
+				{
+					scanList = tmp;
+				}
+			}
+			catch (nameSearchErr)
+			{
+				scanList = tmp;
+			}
+			for each cand in scanList
+			{
+				name_candidates.add(cand);
+			}
+		}
+		if(name_candidates.size() == 0)
+		{
+			name_tc = clean_name.substring(0,1).toUpperCase() + clean_name.substring(1).toLowerCase();
+			tmp = zoho.crm.searchRecords(moduleName,"(Name:equals:" + name_tc + ")",1,5);
+			scanList = List();
+			if(tmp != null)
+			{
+				try
+				{
+					wrapped = tmp.get("data");
+					if(wrapped != null && wrapped.size() > 0)
+					{
+						scanList = wrapped;
+					}
+					else
+					{
+						scanList = tmp;
+					}
+				}
+				catch (nameSearchErr2)
+				{
+					scanList = tmp;
+				}
+				for each cand in scanList
+				{
+					name_candidates.add(cand);
 				}
 			}
 		}
 	}
+	fallbackRec = null;
+	for each cand in name_candidates
+	{
+		reg = cand.get("LEP_Start_Date");
+		regOk = false;
+		if(reg != null)
+		{
+			dateYMD = reg.toString("yyyy-MM-dd");
+			dateDMY = reg.toString("dd-MM-yyyy");
+			rawDate = reg.toString();
+			if(dateYMD == lep_reg_date || dateDMY == lep_reg_ddMMyyyy || rawDate.contains(lep_reg_date) || rawDate.contains(lep_reg_ddMMyyyy))
+			{
+				regOk = true;
+			}
+		}
+		if(regOk)
+		{
+			rec = cand;
+			matchedCohort = true;
+			break;
+		}
+		if(fallbackRec == null)
+		{
+			fallbackRec = cand;
+		}
+	}
+	if(rec == null && fallbackRec != null)
+	{
+		rec = fallbackRec;
+	}
 }
-if(lead_list == null || lead_list.size() == 0)
+if(rec == null)
 {
-	info "LEP FINAL: lead not found for email=" + participant_email + " name=" + participant_name;
+	info "LEP: record not found check=" + check_number + " email=" + participant_email;
 	return;
 }
-lead = lead_list.get(0);
-lead_id = lead.get("id").toString();
+rec_id = rec.get("id").toString();
 updateMap = Map();
-updateMap.put("id",lead_id);
+updateMap.put("id",rec_id);
 updateMap.put(fieldName,resultVal);
-resp = zoho.crm.updateRecord("Leads",lead_id,updateMap);
-info "LEP FINAL: updated lead=" + lead_id + " " + fieldName + "=" + resultVal + " resp=" + resp.toString();
+resp = zoho.crm.updateRecord(moduleName,rec_id,updateMap);
+info "LEP: updated check=" + check_number + " record=" + rec_id + " cohort=" + matchedCohort + " " + fieldName + "=" + resultVal;
 }
