@@ -38,6 +38,7 @@ Optional:
   BM100_CHECKPOINT_2_SECONDS (default 1800 = 30 min, 100BM route)
   BM100_CHECKPOINT_3_SECONDS (default 3600 = 60 min, 100BM route)
   ZOOM_WEBHOOK_SECRET_TOKEN_LEP, ZOHO_WEBHOOK_FORWARD_URL_LEP (LEP route /lep)
+  Extra LEP Zoom accounts: ZOOM_WEBHOOK_SECRET_TOKEN_LEP_2 → /lep2, _LEP_3 → /lep3, _LEP_4 → /lep4
   LEP day offsets are fixed from 9:00 AM IST anchor (see _LEP_DELAYS_DAY1 / _LEP_DELAYS_DAY2)
   BRIDGE_STATE_PATH (default /tmp/bridge_meetings.json) — persist roster/checks across restarts
   BRIDGE_STATE_PERSIST=0 to disable file persistence
@@ -1343,11 +1344,17 @@ def make_handler(
     forward_url_100bm: str = "",
     secret_lep: str = "",
     forward_url_lep: str = "",
+    lep_secrets: dict[str, str] | None = None,
 ):
+    """lep_secrets maps path → Zoom secret, e.g. {"/lep": "...", "/lep2": "..."}."""
+    _lep_by_path = dict(lep_secrets or {})
+    if secret_lep and "/lep" not in _lep_by_path:
+        _lep_by_path["/lep"] = secret_lep
+
     class H(BaseHTTPRequestHandler):
         _secret = secret
         _secret_100bm = secret_100bm
-        _secret_lep = secret_lep
+        _lep_secrets = _lep_by_path
         _forward_url = forward_url
         _forward_url_100bm = forward_url_100bm or forward_url
         _forward_url_lep = forward_url_lep or forward_url
@@ -1357,10 +1364,10 @@ def make_handler(
 
         def _route(self) -> tuple[str, str, str] | None:
             path = self.path.split("?", 1)[0].rstrip("/") or "/"
-            if path == "/lep":
-                if not self._secret_lep:
-                    return None
-                return self._secret_lep, "LEP", self._forward_url_lep
+            if path in self._lep_secrets:
+                return self._lep_secrets[path], "LEP", self._forward_url_lep
+            if path.startswith("/lep"):
+                return None
             if path == "/100bm":
                 if not self._secret_100bm:
                     return None
@@ -1374,11 +1381,12 @@ def make_handler(
             route = self._route()
             if route is None:
                 path = self.path.split("?", 1)[0].rstrip("/") or "/"
-                err = (
-                    '{"error":"/100bm disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_100BM"}'
-                    if path == "/100bm"
-                    else '{"error":"/lep disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_LEP"}'
-                )
+                if path == "/100bm":
+                    err = '{"error":"/100bm disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_100BM"}'
+                elif path.startswith("/lep"):
+                    err = '{"error":"LEP route disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_LEP (and _LEP_2/_3/_4 for extra accounts)"}'
+                else:
+                    err = '{"error":"unknown route"}'
                 self.send_response(404)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -1498,7 +1506,8 @@ def make_handler(
                 "active_100bm_meetings": active_100bm,
                 "active_lep_meetings": active_lep,
                 "route_100bm": bool(self._secret_100bm),
-                "route_lep": bool(self._secret_lep),
+                "route_lep": bool(self._lep_secrets),
+                "lep_routes": sorted(self._lep_secrets.keys()),
                 "bridge_state_persist": persist_enabled(),
                 "bridge_state_path": persist_path(),
                 "mlm_planned_start_enabled": os.environ.get("MC_USE_MLM_PLANNED_START", "1") not in ("0", "false", "no"),
@@ -1516,11 +1525,28 @@ def make_handler(
     return H
 
 
+def _load_lep_secrets() -> dict[str, str]:
+    """Map /lep, /lep2, /lep3, /lep4 → Zoom Secret Token for each LEP Zoom account."""
+    mapping = [
+        ("ZOOM_WEBHOOK_SECRET_TOKEN_LEP", "/lep"),
+        ("ZOOM_WEBHOOK_SECRET_TOKEN_LEP_2", "/lep2"),
+        ("ZOOM_WEBHOOK_SECRET_TOKEN_LEP_3", "/lep3"),
+        ("ZOOM_WEBHOOK_SECRET_TOKEN_LEP_4", "/lep4"),
+    ]
+    out: dict[str, str] = {}
+    for env_key, path in mapping:
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            out[path] = val
+    return out
+
+
 def main() -> None:
     _load_dotenv()
     secret = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN", "").strip()
     secret_100bm = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_100BM", "").strip()
     secret_lep = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_LEP", "").strip()
+    lep_secrets = _load_lep_secrets()
     forward = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL", "").strip()
     forward_100bm = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL_100BM", "").strip()
     forward_lep = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL_LEP", "").strip()
@@ -1540,10 +1566,20 @@ def main() -> None:
 
     _bridge_restore_and_reschedule(forward, forward_100bm, forward_lep)
 
-    handler = make_handler(secret, forward, secret_100bm, forward_100bm, secret_lep, forward_lep)
+    handler = make_handler(
+        secret,
+        forward,
+        secret_100bm,
+        forward_100bm,
+        secret_lep,
+        forward_lep,
+        lep_secrets=lep_secrets,
+    )
     server = ThreadingHTTPServer((args.host, args.port), handler)
     route_100bm = "/100bm enabled" if secret_100bm else "/100bm disabled"
-    route_lep = "/lep enabled" if secret_lep else "/lep disabled"
+    route_lep = (
+        f"enabled {sorted(lep_secrets.keys())}" if lep_secrets else "disabled"
+    )
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
         f"MC checkpoints     : T+{_MC_CHECKPOINT_1}s (first), T+{_MC_CHECKPOINT_2}s (final), T+{_MC_CHECKPOINT_3}s (hour)\n"
@@ -1554,12 +1590,12 @@ def main() -> None:
         f"100BM keywords     : {_100BM_KEYWORDS}\n"
         f"LEP topic keyword  : {_LEP_TOPIC_KEYWORD}\n"
         f"100BM route        : {route_100bm}\n"
-        f"LEP route          : {route_lep}\n"
+        f"LEP routes         : {route_lep}\n"
         f"State persistence  : {'on → ' + persist_path() if persist_enabled() else 'off'}\n"
         f"Forward URL        : {forward}\n"
         "MC /               : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
         "100BM /100bm       : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
-        "LEP /lep           : meeting.started → roster → 3 checks + majority final\n"
+        "LEP /lep[/2/3/4]   : meeting.started → roster → 3 checks + majority final\n"
         "meeting.ended      : MC Completed trigger only (no attendance at end)",
         flush=True,
     )

@@ -123,11 +123,16 @@ At final, `present_emails` / `present_names` = everyone who **ever joined** Zoom
 
 | Variable | Purpose |
 |----------|---------|
-| `ZOOM_WEBHOOK_SECRET_TOKEN_LEP` | Zoom `/lep` |
+| `ZOOM_WEBHOOK_SECRET_TOKEN_LEP` | Zoom account 1 → `/lep` |
 | `ZOHO_WEBHOOK_FORWARD_URL_LEP` | This Flow webhook |
 | `BRIDGE_STATE_PATH` | Persist roster/checks |
+| `ZOOM_WEBHOOK_SECRET_TOKEN_LEP_2` | Zoom account 2 → `/lep2` (optional) |
+| `ZOOM_WEBHOOK_SECRET_TOKEN_LEP_3` | Zoom account 3 → `/lep3` (optional) |
+| `ZOOM_WEBHOOK_SECRET_TOKEN_LEP_4` | Zoom account 4 → `/lep4` (optional) |
 
-Redeploy Render after bridge changes (adds `present_names` + `lep_final_batch`).
+All LEP accounts share the same Zoho Flow. Topics must contain `il lep sessions`.
+
+Redeploy Render after bridge changes (adds `present_names` + `lep_final_batch` + `/lep2`–`/lep4`).
 
 ## No Day 2 blueprint
 
