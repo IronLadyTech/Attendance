@@ -1,0 +1,21 @@
+<!-- Paste into ironlady_session_reminder_premium.html — replace the Hero section -->
+
+<!-- 1) Preheader (~line 33–35) -->
+<div style="display:none; max-height:0; overflow:hidden; opacity:0; color:transparent; line-height:1px; font-size:1px;">
+  {{Reminder_Preheader}}
+</div>
+
+<!-- 2) Hero — red bar only on label + headline; Hello line below -->
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+  <tr>
+    <td width="5" valign="top" style="width:5px; background-color:#ed1c24; border-radius:4px;">&nbsp;</td>
+    <td valign="top" style="padding-left:18px;">
+      <div style="font-size:12px; line-height:16px; font-weight:800; letter-spacing:1.7px; text-transform:uppercase; color:#ed1c24;">{{Reminder_Label}}</div>
+      <h1 class="hero-title" style="margin:7px 0 0 0; font-size:35px; line-height:42px; font-weight:750; letter-spacing:-0.8px; color:#111111;">{{Reminder_Headline}}</h1>
+    </td>
+  </tr>
+</table>
+<p style="margin:18px 0 0 0; padding-left:23px; font-size:16px; line-height:25px; color:#5f5859;">Hello <strong style="color:#171313;">{{Participant_Name}}</strong>,</p>
+<p style="margin:8px 0 0 0; padding-left:23px; font-size:16px; line-height:25px; color:#5f5859;">Please review your session details below and join on time.</p>
+
+<!-- Use ASCII hyphen in text, not em dash: "IL LEP Sessions - Day 1", "Online - Zoom" -->

@@ -1,0 +1,284 @@
+// Zoho Flow — LEP session reminder emails (1 day / 1 hour / 15 min before 9:00 AM IST)
+// Module: Session_Attendance
+// Signature: void send_lep_session_reminder(string reminder_type)
+// Connection: zoho_flow_to_zoho_crm
+//
+// reminder_type: "1day" | "1hour" | "15min"
+//
+// CRM dedupe — one checkbox per session day (Sat Day 1 / Sun Day 2):
+//   LEP_Reminder_1d_D1_Sent, LEP_Reminder_1d_D2_Sent
+//   LEP_Reminder_1h_D1_Sent, LEP_Reminder_1h_D2_Sent
+//   LEP_Reminder_15m_D1_Sent, LEP_Reminder_15m_D2_Sent
+//
+// Optional: set default Zoom link below if no LEP_Zoom_Link on record.
+
+void send_lep_session_reminder(string reminder_type)
+{
+moduleName = "Session_Attendance";
+defaultZoomLink = "https://us02web.zoom.us/j/83826109294?pwd=LzVyR3ZNc2M1S3IxZTNCYTJ6aWlDUT09";
+supportEmail = "admin@iamironlady.com";
+sessionTime = "9:00 AM to 7:00 PM";
+sessionDuration = "10hr (including breaks)";
+sessionMode = "Online - Zoom";
+timeZone = "IST";
+sessionHour = 9;
+sessionMinute = 0;
+windowMinutes = 7;
+if(reminder_type == null || reminder_type.trim() == "")
+{
+	info "LEP reminder: reminder_type required (1day|1hour|15min)";
+	return;
+}
+rtype = reminder_type.trim().toLowerCase();
+minutesBefore = 0;
+if(rtype == "1day")
+{
+	minutesBefore = 1440;
+}
+else if(rtype == "1hour")
+{
+	minutesBefore = 60;
+}
+else if(rtype == "15min")
+{
+	minutesBefore = 15;
+}
+else
+{
+	info "LEP reminder: invalid reminder_type=" + reminder_type;
+	return;
+}
+nowDt = zoho.currenttime;
+todayYMD = nowDt.toString("yyyy-MM-dd");
+// Target session dates: Sat Day1, Sun Day2 (IST org timezone)
+targetSessions = List();
+if(rtype == "1day")
+{
+	tomorrowDt = nowDt.addDay(1);
+	tomorrowYMD = tomorrowDt.toString("yyyy-MM-dd");
+	wd = tomorrowDt.getDayOfWeek();
+	if(wd == 7)
+	{
+		s = Map();
+		s.put("session_day","Day 1");
+		s.put("session_date",tomorrowYMD);
+		s.put("batch_date",tomorrowYMD);
+		targetSessions.add(s);
+	}
+	else if(wd == 1)
+	{
+		batchDt = tomorrowDt.addDay(-1);
+		s = Map();
+		s.put("session_day","Day 2");
+		s.put("session_date",tomorrowYMD);
+		s.put("batch_date",batchDt.toString("yyyy-MM-dd"));
+		targetSessions.add(s);
+	}
+}
+else
+{
+	wdToday = nowDt.getDayOfWeek();
+	if(wdToday == 7)
+	{
+		s = Map();
+		s.put("session_day","Day 1");
+		s.put("session_date",todayYMD);
+		s.put("batch_date",todayYMD);
+		targetSessions.add(s);
+	}
+	else if(wdToday == 1)
+	{
+		batchDt = nowDt.addDay(-1);
+		s = Map();
+		s.put("session_day","Day 2");
+		s.put("session_date",todayYMD);
+		s.put("batch_date",batchDt.toString("yyyy-MM-dd"));
+		targetSessions.add(s);
+	}
+}
+if(targetSessions.size() == 0)
+{
+	info "LEP reminder: no session window for type=" + rtype + " today=" + todayYMD;
+	return;
+}
+for each target in targetSessions
+{
+	sessionDay = target.get("session_day");
+	sessionDateYMD = target.get("session_date");
+	batchYMD = target.get("batch_date");
+	flagField = "";
+	if(rtype == "1day")
+	{
+		if(sessionDay == "Day 1")
+		{
+			flagField = "LEP_Reminder_1d_D1_Sent";
+		}
+		else
+		{
+			flagField = "LEP_Reminder_1d_D2_Sent";
+		}
+	}
+	else if(rtype == "1hour")
+	{
+		if(sessionDay == "Day 1")
+		{
+			flagField = "LEP_Reminder_1h_D1_Sent";
+		}
+		else
+		{
+			flagField = "LEP_Reminder_1h_D2_Sent";
+		}
+	}
+	else
+	{
+		if(sessionDay == "Day 1")
+		{
+			flagField = "LEP_Reminder_15m_D1_Sent";
+		}
+		else
+		{
+			flagField = "LEP_Reminder_15m_D2_Sent";
+		}
+	}
+	sessionStart = sessionDateYMD.toTime("yyyy-MM-dd").addHour(sessionHour).addMinutes(sessionMinute);
+	diffMin = (sessionStart.toLong() - nowDt.toLong()) / 60000;
+	if(rtype == "1day")
+	{
+		// Daily 6:00 PM IST trigger → ~900 min before next-day 9:00 AM session
+		lo = 870;
+		hi = 930;
+		if(diffMin < lo || diffMin > hi)
+		{
+			info "LEP reminder: skip 1day diffMin=" + diffMin + " want=" + lo + "-" + hi + " session=" + sessionDateYMD;
+			continue;
+		}
+	}
+	else
+	{
+		lo = minutesBefore - windowMinutes;
+		hi = minutesBefore + windowMinutes;
+		if(diffMin < lo || diffMin > hi)
+		{
+			info "LEP reminder: skip " + rtype + " diffMin=" + diffMin + " want=" + lo + "-" + hi;
+			continue;
+		}
+	}
+	batchDMY = batchYMD.subString(8,10) + "-" + batchYMD.subString(5,7) + "-" + batchYMD.subString(0,4);
+	sessionDateDisplay = sessionDateYMD.subString(8,10) + "-" + sessionDateYMD.subString(5,7) + "-" + sessionDateYMD.subString(0,4);
+	sessionTitle = "IL LEP Sessions - Day 1";
+	weekdayLabel = "Saturday";
+	if(sessionDay == "Day 2")
+	{
+		sessionTitle = "IL LEP Sessions - Day 2";
+		weekdayLabel = "Sunday";
+	}
+	headline = "Your session is almost here.";
+	label = "Join now";
+	preheader = "Your session starts in 15 minutes.";
+	subject = "Starting in 15 minutes: IL LEP " + sessionDay;
+	if(rtype == "1day")
+	{
+		headline = "Your LEP session is tomorrow.";
+		label = "Session reminder";
+		preheader = "Your IronLady LEP session is tomorrow. Review details and join on time.";
+		subject = "Reminder: IL LEP " + sessionDay + " - " + weekdayLabel + " 9:00 AM to 7:00 PM IST";
+	}
+	else if(rtype == "1hour")
+	{
+		headline = "Your session starts in 1 hour.";
+		label = "Starting soon";
+		preheader = "Your IronLady session starts in one hour.";
+		subject = "Starting in 1 hour: IL LEP " + sessionDay;
+	}
+	// getRecords returns a List of records (not a Map). Do NOT call .get("data") —
+	// that triggers BIGINT type error (List.get expects a numeric index).
+	allRecords = List();
+	pageNums = {1,2,3,4,5};
+	for each pageNum in pageNums
+	{
+		pageRecs = zoho.crm.getRecords(moduleName,pageNum,200);
+		if(pageRecs != null && pageRecs.size() >= 1)
+		{
+			for each pageRec in pageRecs
+			{
+				allRecords.add(pageRec);
+			}
+			if(pageRecs.size() < 200)
+			{
+				break;
+			}
+		}
+		else
+		{
+			break;
+		}
+	}
+	sentCount = 0;
+	for each rec in allRecords
+	{
+		already = rec.get(flagField);
+		if(already == true)
+		{
+			continue;
+		}
+		reg = rec.get("LEP_Start_Date");
+		if(reg == null)
+		{
+			continue;
+		}
+		dateYMD = reg.toString("yyyy-MM-dd");
+		dateDMY = reg.toString("dd-MM-yyyy");
+		rawDate = reg.toString();
+		if(dateYMD != batchYMD && dateDMY != batchDMY && !rawDate.contains(batchYMD) && !rawDate.contains(batchDMY))
+		{
+			continue;
+		}
+		toEmail = rec.get("Email");
+		if(toEmail == null || toEmail.trim() == "" || toEmail == "null")
+		{
+			toEmail = rec.get("Lead_Email");
+		}
+		if(toEmail == null || toEmail.trim() == "" || toEmail == "null")
+		{
+			continue;
+		}
+		participantName = rec.get("Name");
+		if(participantName == null || participantName.trim() == "" || participantName == "null")
+		{
+			participantName = "Participant";
+		}
+		joinLink = defaultZoomLink;
+		zl = rec.get("LEP_Zoom_Link");
+		if(zl != null && zl.toString().trim() != "" && zl.toString() != "null")
+		{
+			joinLink = zl.toString().trim();
+		}
+		htmlBody = "<html><body style='font-family:Arial,sans-serif;'>";
+		htmlBody = htmlBody + "<p style='color:#ed1c24;font-size:12px;font-weight:bold;'>" + label + "</p>";
+		htmlBody = htmlBody + "<h1 style='color:#111;'>" + headline + "</h1>";
+		htmlBody = htmlBody + "<p>Hello <strong>" + participantName + "</strong>,</p>";
+		htmlBody = htmlBody + "<p><strong>Session:</strong> " + sessionTitle + "<br>";
+		htmlBody = htmlBody + "<strong>Date:</strong> " + sessionDateDisplay + "<br>";
+		htmlBody = htmlBody + "<strong>Time:</strong> " + sessionTime + " " + timeZone + "<br>";
+		htmlBody = htmlBody + "<strong>Duration:</strong> " + sessionDuration + "</p>";
+		htmlBody = htmlBody + "<p><a href='" + joinLink + "' style='background:#ed1c24;color:#fff;padding:12px 20px;text-decoration:none;border-radius:6px;'>JOIN YOUR SESSION</a></p>";
+		htmlBody = htmlBody + "<p style='font-size:12px;color:#666;'>Support: " + supportEmail + "</p>";
+		htmlBody = htmlBody + "</body></html>";
+		sendmail
+		[
+			from :zoho.loginuserid
+			to: toEmail.trim()
+			subject: subject
+			message: htmlBody
+		]
+		recId = rec.get("id").toString();
+		up = Map();
+		up.put("id",recId);
+		up.put(flagField,true);
+		zoho.crm.updateRecord(moduleName,recId,up);
+		sentCount = sentCount + 1;
+		info "LEP reminder sent type=" + rtype + " to=" + toEmail + " " + sessionDay + " batch=" + batchYMD;
+	}
+	info "LEP reminder done type=" + rtype + " session=" + sessionDateYMD + " sent=" + sentCount;
+}
+}

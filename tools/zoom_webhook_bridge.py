@@ -20,8 +20,8 @@ MC route (POST /):
 LEP route (POST /lep) — IL LEP Sessions (majority of 3 checks, 9:00 AM anchor):
   - meeting.started → schedule 4 sweeps (check1, check2, check3, final majority)
   - meeting.participant_joined / left → maintain roster
-  - sweeps 1–3 → attendance.lep_check (each participant) + lep_batch_check (cohort absent)
-  - sweep 4 (final) → majority → attendance.lep_final
+  - sweeps 1–3 → attendance.lep_check (each participant) + lep_batch_check (present + ever_joined)
+  - sweep 4 (final) → majority → attendance.lep_final + lep_final_batch (never joined → Absent) + lep_final_report
   - meeting.ended → cancel timers only (no CRM completion)
 
 Environment variables required:
@@ -281,6 +281,17 @@ def _mc_roster_key(email: str, name: str) -> str:
     return ""
 
 
+def _participant_email(participant: dict) -> str:
+    """Zoom may omit email for guests; try known fields when present."""
+    if not isinstance(participant, dict):
+        return ""
+    for key in ("email", "user_email", "participant_email"):
+        val = participant.get(key)
+        if val is not None and str(val).strip() and str(val).strip().lower() != "null":
+            return str(val).strip()
+    return ""
+
+
 def _mc_base_payload(state: dict) -> dict:
     return {
         "meeting_id": state["meeting_id"],
@@ -338,6 +349,15 @@ def _ever_joined_email_csv(ever_joined: dict) -> str:
     return ",".join(emails)
 
 
+def _ever_joined_name_csv(ever_joined: dict) -> str:
+    names: list[str] = []
+    for info in ever_joined.values():
+        n = (info.get("name") or "").strip()
+        if n:
+            names.append(n)
+    return ",".join(names)
+
+
 def _roster_email_csv(roster: dict) -> str:
     """Emails in the meeting room at this checkpoint (T+30 present list)."""
     emails: list[str] = []
@@ -346,6 +366,15 @@ def _roster_email_csv(roster: dict) -> str:
         if e:
             emails.append(e)
     return ",".join(emails)
+
+
+def _roster_name_csv(roster: dict) -> str:
+    names: list[str] = []
+    for info in roster.values():
+        n = (info.get("name") or "").strip()
+        if n:
+            names.append(n)
+    return ",".join(names)
 
 
 def _checkpoint_event(sweep: int) -> str:
@@ -982,13 +1011,17 @@ def _lep_mark_batch_check(
     state: dict,
     check_number: int,
     roster: dict,
+    ever_joined: dict,
 ) -> None:
-    """Cohort LEP Started + LEP_Reg_Date not in room at this check → Absent (sales call list)."""
+    """Cohort not in room at this check → Absent (sales call list) + report payload."""
     payload = _lep_base_payload(state)
     payload.update({
         "event": "attendance.lep_batch_check",
         "check_number": str(check_number),
         "present_emails": _roster_email_csv(roster),
+        "present_names": _roster_name_csv(roster),
+        "ever_joined_emails": _ever_joined_email_csv(ever_joined),
+        "ever_joined_names": _ever_joined_name_csv(ever_joined),
     })
     _post_to_zoho(forward_url, payload, f"lep-batch-check{check_number}")
 
@@ -1013,6 +1046,44 @@ def _lep_mark_final(
         "check_3": "Present" if len(checks) > 2 and checks[2] else "Absent",
     })
     _post_to_zoho(forward_url, payload, "lep-final")
+
+
+def _lep_mark_final_report(
+    forward_url: str,
+    state: dict,
+    majority_present_emails: list[str],
+    ever_joined: dict,
+) -> None:
+    """One webhook after majority finals so Flow can email a cohort report."""
+    emails = sorted({e.strip().lower() for e in majority_present_emails if e and e.strip()})
+    payload = _lep_base_payload(state)
+    payload.update({
+        "event": "attendance.lep_final_report",
+        "check_number": "final",
+        "present_emails": ",".join(emails),
+        "ever_joined_emails": _ever_joined_email_csv(ever_joined),
+        "ever_joined_names": _ever_joined_name_csv(ever_joined),
+    })
+    _post_to_zoho(forward_url, payload, "lep-final-report")
+
+
+def _lep_mark_final_batch(
+    forward_url: str,
+    state: dict,
+    ever_joined: dict,
+) -> None:
+    """After majority: mark cohort members who never joined Zoom as Absent."""
+    payload = _lep_base_payload(state)
+    payload.update({
+        "event": "attendance.lep_final_batch",
+        "check_number": "final",
+        # Treat anyone who ever joined as "present" for skip — do not overwrite to Absent
+        "present_emails": _ever_joined_email_csv(ever_joined),
+        "present_names": _ever_joined_name_csv(ever_joined),
+        "ever_joined_emails": _ever_joined_email_csv(ever_joined),
+        "ever_joined_names": _ever_joined_name_csv(ever_joined),
+    })
+    _post_to_zoho(forward_url, payload, "lep-final-batch")
 
 
 def _lep_sweep(meeting_id: str, sweep: int) -> None:
@@ -1049,7 +1120,7 @@ def _lep_sweep(meeting_id: str, sweep: int) -> None:
                 )
                 if email or name:
                     _lep_mark_check(forward_url, st, email, name, sweep, result)
-        _lep_mark_batch_check(forward_url, state, sweep, roster)
+        _lep_mark_batch_check(forward_url, state, sweep, roster, ever_joined)
         _bridge_persist()
         return
 
@@ -1064,6 +1135,7 @@ def _lep_sweep(meeting_id: str, sweep: int) -> None:
         state = dict(st)
 
     final_results: list[tuple[str, str, str, list[bool]]] = []
+    majority_present_emails: list[str] = []
     for rkey, info in ever_joined.items():
         email = info.get("email", "")
         name = info.get("name", "")
@@ -1074,7 +1146,12 @@ def _lep_sweep(meeting_id: str, sweep: int) -> None:
             checks.append(False)
         result = _lep_majority(checks)
         final_results.append((email, name, result, checks[:3]))
+        if result == "Present" and email:
+            majority_present_emails.append(email)
         _lep_mark_final(forward_url, state, email, name, result, checks[:3])
+
+    _lep_mark_final_report(forward_url, state, majority_present_emails, ever_joined)
+    _lep_mark_final_batch(forward_url, state, ever_joined)
 
     sys.stderr.write(
         f"[lep/sweep4] final updates={len(final_results)} "
@@ -1154,7 +1231,7 @@ def _handle_lep_participant_joined(body: dict, forward_url: str) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
-    email = participant.get("email", "").strip()
+    email = _participant_email(participant)
     name = participant.get("user_name", "").strip()
     join_time = participant.get("join_time", "")
     topic = obj.get("topic", "")
@@ -1167,6 +1244,12 @@ def _handle_lep_participant_joined(body: dict, forward_url: str) -> None:
     if not rkey:
         sys.stderr.write("[lep/join] Missing email and name — skipping roster\n")
         return
+
+    if not email:
+        sys.stderr.write(
+            f"[lep/join] Zoom sent no email for {name!r} "
+            "(guest / not logged in / not registered) — will match CRM by name\n"
+        )
 
     with _lep_lock:
         state = _lep_meetings.get(meeting_id)
@@ -1208,7 +1291,7 @@ def _handle_lep_participant_left(body: dict) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
-    email = participant.get("email", "").strip()
+    email = _participant_email(participant)
     name = participant.get("user_name", "").strip()
     topic = obj.get("topic", "")
 

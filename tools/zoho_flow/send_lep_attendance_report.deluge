@@ -1,0 +1,299 @@
+// Zoho Flow — LEP attendance report email (checks 1–3 + final majority)
+// Module: Session_Attendance
+// Signature: void send_lep_attendance_report(string meeting_topic, string session_date, string session_day, string batch_date, string check_number, string present_emails, string ever_joined_emails)
+// Connection: zoho_flow_to_zoho_crm
+//
+// Wire as SECOND action after mark_lep_attendance_final on:
+//   attendance.lep_batch_check  → check_number = 1 | 2 | 3
+//   attendance.lep_final_report → check_number = final
+//
+// Status (matches CRM LEP_Day_1_Session / LEP_Day_2_Session):
+//   Checks 1–3: in present_emails → Present ; else Absent
+//   Final:      in present_emails (majority Present list) → Present ; else Absent
+//   Guests: joined Zoom email not found on Session_Attendance for this batch
+
+void send_lep_attendance_report(string meeting_topic, string session_date, string session_day, string batch_date, string check_number, string present_emails, string ever_joined_emails)
+{
+reportTo = "ironladytech@gmail.com,yaswanthgrandhi2580@gmail.com,brunda@iamironlady.com";
+moduleName = "Session_Attendance";
+if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
+{
+	topicL = meeting_topic.toLowerCase();
+	if(!topicL.contains("il lep sessions"))
+	{
+		info "LEP report: unknown topic=" + meeting_topic;
+		return;
+	}
+}
+sessionDay = "Day 1";
+fieldName = "LEP_Day_1_Session";
+if(session_day != null && session_day.toLowerCase().contains("day 2"))
+{
+	sessionDay = "Day 2";
+	fieldName = "LEP_Day_2_Session";
+}
+checkKey = "";
+if(check_number != null)
+{
+	checkKey = check_number.trim().toLowerCase();
+}
+if(checkKey != "1" && checkKey != "2" && checkKey != "3" && checkKey != "final")
+{
+	info "LEP report: invalid check_number=" + check_number;
+	return;
+}
+lep_reg_date = batch_date;
+if(lep_reg_date == null || lep_reg_date.trim() == "" || lep_reg_date == "null")
+{
+	lep_reg_date = session_date;
+	if(lep_reg_date == null || lep_reg_date.trim() == "" || lep_reg_date == "null")
+	{
+		info "LEP report: batch_date and session_date missing";
+		return;
+	}
+	lep_reg_date = lep_reg_date.trim();
+	if(sessionDay == "Day 2")
+	{
+		day2_dt = lep_reg_date.toTime("yyyy-MM-dd");
+		lep_reg_date = (day2_dt.toLong() - 86400000).toTime().toString("yyyy-MM-dd");
+	}
+}
+else
+{
+	lep_reg_date = lep_reg_date.trim();
+}
+lep_reg_ddMMyyyy = lep_reg_date.subString(8,10) + "-" + lep_reg_date.subString(5,7) + "-" + lep_reg_date.subString(0,4);
+presentCsv = "";
+if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+{
+	presentCsv = "," + present_emails.toLowerCase().replaceAll(" ","").trim() + ",";
+}
+everCsv = "";
+if(ever_joined_emails != null && ever_joined_emails.trim() != "" && ever_joined_emails != "null")
+{
+	everCsv = "," + ever_joined_emails.toLowerCase().replaceAll(" ","").trim() + ",";
+}
+// getRecords returns a List — do not call .get("data")
+allRecords = List();
+pageNums = {1,2,3,4,5};
+for each pageNum in pageNums
+{
+	pageRecs = zoho.crm.getRecords(moduleName,pageNum,200);
+	if(pageRecs != null && pageRecs.size() >= 1)
+	{
+		for each pageRec in pageRecs
+		{
+			allRecords.add(pageRec);
+		}
+		if(pageRecs.size() < 200)
+		{
+			break;
+		}
+	}
+	else
+	{
+		break;
+	}
+}
+presentCount = 0;
+absentCount = 0;
+matchedCount = 0;
+rows = "";
+crmEmails = "";
+for each rec in allRecords
+{
+	reg = rec.get("LEP_Start_Date");
+	if(reg == null)
+	{
+		continue;
+	}
+	dateYMD = reg.toString("yyyy-MM-dd");
+	dateDMY = reg.toString("dd-MM-yyyy");
+	rawDate = reg.toString();
+	if(dateYMD != lep_reg_date && dateDMY != lep_reg_ddMMyyyy && !rawDate.contains(lep_reg_date) && !rawDate.contains(lep_reg_ddMMyyyy))
+	{
+		continue;
+	}
+	matchedCount = matchedCount + 1;
+	recEmail = rec.get("Email");
+	if(recEmail == null || recEmail.trim() == "" || recEmail == "null")
+	{
+		recEmail = rec.get("Lead_Email");
+	}
+	recName = rec.get("Name");
+	if(recName == null || recName == "null")
+	{
+		recName = "";
+	}
+	emailL = "";
+	if(recEmail != null && recEmail.trim() != "" && recEmail != "null")
+	{
+		emailL = recEmail.toLowerCase().trim();
+		crmEmails = crmEmails + "," + emailL;
+	}
+	crmStatus = rec.get(fieldName);
+	crmStatusStr = "";
+	if(crmStatus != null)
+	{
+		crmStatusStr = crmStatus.toString();
+	}
+	inPresent = false;
+	inEverJoined = false;
+	if(emailL != "" && presentCsv != "" && presentCsv.contains("," + emailL + ","))
+	{
+		inPresent = true;
+	}
+	if(emailL != "" && everCsv != "" && everCsv.contains("," + emailL + ","))
+	{
+		inEverJoined = true;
+	}
+	status = "Absent";
+	reason = "";
+	if(checkKey == "final")
+	{
+		if(inPresent)
+		{
+			status = "Present";
+			reason = "Majority Present (2+ of 3 checks)";
+		}
+		else if(inEverJoined)
+		{
+			status = "Absent";
+			reason = "Joined Zoom but majority Absent";
+		}
+		else
+		{
+			status = "Absent";
+			reason = "Never joined Zoom / majority Absent";
+		}
+		if(crmStatusStr != "" && crmStatusStr != "null")
+		{
+			reason = reason + " | CRM: " + crmStatusStr;
+		}
+	}
+	else
+	{
+		if(inPresent)
+		{
+			status = "Present";
+			reason = "In Zoom room at check " + checkKey;
+		}
+		else if(inEverJoined)
+		{
+			status = "Absent";
+			reason = "Joined earlier but not in room at check " + checkKey;
+		}
+		else
+		{
+			status = "Absent";
+			reason = "Not in room at check " + checkKey + " (sales call list)";
+		}
+	}
+	if(status == "Present")
+	{
+		presentCount = presentCount + 1;
+	}
+	else
+	{
+		absentCount = absentCount + 1;
+	}
+	rowColor = "#ffebee";
+	if(status == "Present")
+	{
+		rowColor = "#e8f5e9";
+	}
+	displayEmail = "";
+	if(recEmail != null && recEmail != "null")
+	{
+		displayEmail = recEmail;
+	}
+	rows = rows + "<tr style='background:" + rowColor + ";'><td>" + matchedCount + "</td><td>" + displayEmail + "</td><td>" + recName + "</td><td><b>" + status + "</b></td><td>" + reason + "</td></tr>";
+}
+crmEmailsCsv = crmEmails + ",";
+guestRows = "";
+guestCount = 0;
+guestSeen = ",";
+if(ever_joined_emails != null && ever_joined_emails.trim() != "" && ever_joined_emails != "null")
+{
+	joinedList = ever_joined_emails.toLowerCase().replaceAll(" ","").trim().toList(",");
+	for each ge in joinedList
+	{
+		g = ge.trim();
+		if(g != "" && !crmEmailsCsv.contains("," + g + ",") && !guestSeen.contains("," + g + ","))
+		{
+			guestSeen = guestSeen + g + ",";
+			guestCount = guestCount + 1;
+			gStatus = "Absent";
+			gReason = "Joined but not in room at this check";
+			if(presentCsv.contains("," + g + ","))
+			{
+				gStatus = "Present";
+				gReason = "In Zoom room at this check";
+			}
+			guestRows = guestRows + "<tr style='background:#ede7f6;'><td>" + guestCount + "</td><td>" + g + "</td><td><b>" + gStatus + "</b> (guest)</td><td>" + gReason + " — no Session Attendance match</td></tr>";
+		}
+	}
+}
+checkLabel = "Check " + checkKey;
+if(checkKey == "1")
+{
+	checkLabel = "Check 1";
+}
+else if(checkKey == "2")
+{
+	checkLabel = "Check 2";
+}
+else if(checkKey == "3")
+{
+	checkLabel = "Check 3";
+}
+else if(checkKey == "final")
+{
+	checkLabel = "Final (majority of 3 checks)";
+}
+countLine = "Present: <b>" + presentCount + "</b> &nbsp;|&nbsp; Absent: <b>" + absentCount + "</b> &nbsp;|&nbsp; Total matched: <b>" + matchedCount + "</b>";
+html = "<div style='font-family:Segoe UI,Arial,sans-serif;color:#222;'>";
+html = html + "<h2>LEP Attendance Report — " + checkLabel + "</h2>";
+html = html + "<p><b>" + sessionDay + "</b> &nbsp;|&nbsp; Batch (LEP Start Date): <b>" + lep_reg_date + "</b>";
+if(session_date != null && session_date.trim() != "" && session_date != "null")
+{
+	html = html + " &nbsp;|&nbsp; Session date: <b>" + session_date + "</b>";
+}
+html = html + "</p>";
+html = html + "<p>Session: " + meeting_topic + "</p>";
+html = html + "<p style='font-size:15px;'>" + countLine + "</p>";
+html = html + "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;font-size:13px;'>";
+html = html + "<tr style='background:#f0f0f0;'><th>#</th><th>Email</th><th>Name</th><th>Status</th><th>Reason</th></tr>";
+html = html + rows;
+html = html + "</table>";
+if(guestCount > 0)
+{
+	html = html + "<h3>Guests / Unmatched (joined Zoom, no Session Attendance match)</h3>";
+	html = html + "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;font-size:13px;'>";
+	html = html + "<tr style='background:#f0f0f0;'><th>#</th><th>Email</th><th>Status</th><th>Note</th></tr>";
+	html = html + guestRows;
+	html = html + "</table>";
+}
+html = html + "<h3>What the statuses mean</h3><ul>";
+if(checkKey == "final")
+{
+	html = html + "<li><b>Present</b> — Present in 2 or more of the 3 checkpoints (majority).</li>";
+	html = html + "<li><b>Absent</b> — Present in fewer than 2 checks (or never joined).</li>";
+}
+else
+{
+	html = html + "<li><b>Present</b> — in the Zoom room at this checkpoint.</li>";
+	html = html + "<li><b>Absent</b> — not in the room at this checkpoint (sales can call the Absent list).</li>";
+}
+html = html + "</ul>";
+html = html + "<p style='color:#888;font-size:12px;'>Matched by Email / Lead_Email on Session_Attendance where LEP_Start_Date = batch. CRM field: " + fieldName + ".</p></div>";
+subject = "LEP Attendance — " + checkLabel + " — " + sessionDay + " " + lep_reg_date + " (Present " + presentCount + " / Absent " + absentCount + ")";
+sendmail
+[
+	from :zoho.loginuserid
+	to :reportTo
+	subject :subject
+	message :html
+]
+info "LEP report sent: check=" + checkKey + " day=" + sessionDay + " batch=" + lep_reg_date + " present=" + presentCount + " absent=" + absentCount + " guests=" + guestCount;
+}
