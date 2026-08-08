@@ -13,7 +13,7 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 	}
 
 	topicL = meeting_topic.toLowerCase();
-	isLepTopic = topicL.contains("il lep sessions") || topicL.contains("il lep") || topicL.contains("lep day") || topicL.contains("2 day session") || topicL.contains("2-day session");
+	isLepTopic = topicL.contains("il lep sessions") || topicL.contains("il lep") || topicL.contains("ironlady lep") || topicL.contains("lep day") || topicL.contains("2 day session") || topicL.contains("2-day session");
 	if(!isLepTopic)
 	{
 		info "LEP: unknown topic - skipping: " + meeting_topic;

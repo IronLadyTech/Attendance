@@ -87,6 +87,7 @@ _100BM_KEYWORDS = ["orientation session", "fast track your leadership growth"]
 _LEP_TOPIC_KEYWORDS_DEFAULT = [
     "il lep sessions",
     "il lep",
+    "ironlady lep",
     "lep day",
     "2 day session",
     "2-day session",
