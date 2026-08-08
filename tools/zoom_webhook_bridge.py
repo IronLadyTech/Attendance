@@ -83,7 +83,21 @@ _MC_MEETING_KEYWORDS = _DAY1_KEYWORDS + _DAY2_KEYWORDS
 
 _100BM_KEYWORDS = ["orientation session", "fast track your leadership growth"]
 
-_LEP_TOPIC_KEYWORD = "il lep sessions"
+# LEP meeting topics (any match → LEP route). Override via LEP_TOPIC_KEYWORDS=a,b,c
+_LEP_TOPIC_KEYWORDS_DEFAULT = [
+    "il lep sessions",
+    "il lep",
+    "lep day",
+    "2 day session",
+    "2-day session",
+]
+
+
+def _lep_topic_keywords() -> list[str]:
+    raw = os.environ.get("LEP_TOPIC_KEYWORDS", "").strip()
+    if raw:
+        return [k.strip().lower() for k in raw.split(",") if k.strip()]
+    return list(_LEP_TOPIC_KEYWORDS_DEFAULT)
 
 # LEP checkpoint offsets from 9:00 AM IST on session_date (seconds)
 # Day 1: 9:15, 15:30, 18:15, final 18:30
@@ -187,7 +201,10 @@ def _is_100bm_topic(topic: str) -> bool:
 
 
 def _is_lep_topic(topic: str) -> bool:
-    return _LEP_TOPIC_KEYWORD in topic.lower()
+    if not topic:
+        return False
+    topic_l = topic.lower()
+    return any(kw in topic_l for kw in _lep_topic_keywords())
 
 
 def _lep_session_day(topic: str, session_date: str = "") -> str:
@@ -1588,7 +1605,7 @@ def main() -> None:
         f"Day 1 keywords     : {_DAY1_KEYWORDS}\n"
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
         f"100BM keywords     : {_100BM_KEYWORDS}\n"
-        f"LEP topic keyword  : {_LEP_TOPIC_KEYWORD}\n"
+        f"LEP topic keywords : {_lep_topic_keywords()}\n"
         f"100BM route        : {route_100bm}\n"
         f"LEP routes         : {route_lep}\n"
         f"State persistence  : {'on → ' + persist_path() if persist_enabled() else 'off'}\n"

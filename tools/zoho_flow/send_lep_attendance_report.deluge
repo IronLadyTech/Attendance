@@ -19,7 +19,8 @@ moduleName = "Session_Attendance";
 if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
 {
 	topicL = meeting_topic.toLowerCase();
-	if(!topicL.contains("il lep sessions"))
+	isLepTopic = topicL.contains("il lep sessions") || topicL.contains("il lep") || topicL.contains("lep day") || topicL.contains("2 day session") || topicL.contains("2-day session");
+	if(!isLepTopic)
 	{
 		info "LEP report: unknown topic=" + meeting_topic;
 		return;

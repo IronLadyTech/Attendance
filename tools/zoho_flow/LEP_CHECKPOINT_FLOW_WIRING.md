@@ -130,7 +130,7 @@ At final, `present_emails` / `present_names` = everyone who **ever joined** Zoom
 | `ZOOM_WEBHOOK_SECRET_TOKEN_LEP_3` | Zoom account 3 → `/lep3` (optional) |
 | `ZOOM_WEBHOOK_SECRET_TOKEN_LEP_4` | Zoom account 4 → `/lep4` (optional) |
 
-All LEP accounts share the same Zoho Flow. Topics must contain `il lep sessions`.
+All LEP accounts share the same Zoho Flow. Accepted topic substrings (any one): `il lep sessions`, `il lep`, `lep day`, `2 day session`. Override with Render env `LEP_TOPIC_KEYWORDS`.
 
 Redeploy Render after bridge changes (adds `present_names` + `lep_final_batch` + `/lep2`–`/lep4`).
 
