@@ -98,7 +98,15 @@ def run_redis_connectivity_test() -> bool:
     try:
         _strip_redis_env()
         url = os.environ.get("UPSTASH_REDIS_REST_URL", "")
-        if not url.startswith("https://"):
+        lower = url.lower()
+        if lower.startswith("redis://") or lower.startswith("rediss://"):
+            sys.stderr.write(
+                "[lep/redis-test] failed — got redis:// URL; "
+                "set UPSTASH_REDIS_REST_URL to the HTTPS REST URL "
+                "(Upstash → REST API → UPSTASH_REDIS_REST_URL), not the Redis connection string\n"
+            )
+            return False
+        if not lower.startswith("https://"):
             sys.stderr.write(
                 "[lep/redis-test] failed — URL must start with https:// "
                 "(use REST URL from Upstash console, not redis://)\n"
