@@ -17,12 +17,13 @@ MC route (POST /):
   - T+30 → mark_yes (in room) + mark_no (joined-left dropout) + attendance.final_check
   - T+60 → mark_yes (in room) + attendance.hour_check (upgrade No/Absent → Yes only)
 
-LEP route (POST /lep) — IL LEP Sessions (majority of 3 checks, 9:00 AM anchor):
-  - meeting.started → schedule 4 sweeps (check1, check2, check3, final majority)
-  - meeting.participant_joined / left → maintain roster
-  - sweeps 1–3 → attendance.lep_check (each participant) + lep_batch_check (present + ever_joined)
-  - sweep 4 (final) → majority → attendance.lep_final + lep_final_batch (never joined → Absent) + lep_final_report
-  - meeting.ended → cancel timers only (no CRM completion)
+LEP route (POST /lep|/lep2|/lep3|/lep4) — IL LEP Sessions (9:00 AM IST anchor):
+  Durable mode (UPSTASH_REDIS_REST_URL set):
+  - join/leave → Redis per-room roster (four rooms UNIONed at checkpoint)
+  - QStash schedules one Check1/2/3 + Final per session_key=lep:{batch}:{day}
+  - POST /internal/lep/checkpoint|final → global Present → Zoho (never per-room batch Absent)
+  - Final majority from Redis C1/C2/C3; Missing != Absent
+  Legacy mode (no Redis): in-memory timers + per-meeting sweeps (deprecated)
 
 Environment variables required:
   ZOOM_WEBHOOK_SECRET_TOKEN, ZOHO_WEBHOOK_FORWARD_URL
@@ -40,8 +41,11 @@ Optional:
   ZOOM_WEBHOOK_SECRET_TOKEN_LEP, ZOHO_WEBHOOK_FORWARD_URL_LEP (LEP route /lep)
   Extra LEP Zoom accounts: ZOOM_WEBHOOK_SECRET_TOKEN_LEP_2 → /lep2, _LEP_3 → /lep3, _LEP_4 → /lep4
   LEP day offsets are fixed from 9:00 AM IST anchor (see _LEP_DELAYS_DAY1 / _LEP_DELAYS_DAY2)
-  BRIDGE_STATE_PATH (default /tmp/bridge_meetings.json) — persist roster/checks across restarts
+  BRIDGE_STATE_PATH (default /tmp/bridge_meetings.json) — optional MC/100BM cache only when LEP durable
   BRIDGE_STATE_PERSIST=0 to disable file persistence
+  UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN — durable LEP Redis
+  QSTASH_TOKEN / QSTASH_CURRENT_SIGNING_KEY / QSTASH_NEXT_SIGNING_KEY — durable LEP timers
+  PUBLIC_BASE_URL — Render public URL for QStash callbacks
 """
 from __future__ import annotations
 
@@ -66,6 +70,14 @@ if _TOOLS_DIR not in sys.path:
 
 from zoho_crm_mlm import resolve_checkpoint_anchor  # noqa: E402
 from bridge_state_persist import load_meetings, persist_enabled, persist_path, save_meetings  # noqa: E402
+import lep_redis as _lep_redis  # noqa: E402
+import lep_qstash as _lep_qstash  # noqa: E402
+from lep_checkpoint import execute_checkpoint, execute_final  # noqa: E402
+from lep_identity import (  # noqa: E402
+    extract_zoom_participant_id,
+    participant_identity,
+    zoom_account_from_path,
+)
 
 # MC checkpoint delays from actual Zoom meeting start
 _MC_CHECKPOINT_1 = int(os.environ.get("MC_CHECKPOINT_1_SECONDS", "900"))   # T+15
@@ -1106,6 +1118,15 @@ def _lep_mark_final_batch(
 
 
 def _lep_sweep(meeting_id: str, sweep: int) -> None:
+    # Durable Redis+QStash mode: per-meeting timers must NOT update Zoho
+    # (would mark Absent from a single room). Checkpoints run via /internal/lep/*.
+    if _lep_redis.durable_lep_enabled():
+        sys.stderr.write(
+            f"[lep/sweep{sweep}] durable mode — skip per-room Zoho "
+            f"meeting={meeting_id}\n"
+        )
+        return
+
     with _lep_lock:
         state = _lep_meetings.get(meeting_id)
         if not state:
@@ -1143,7 +1164,7 @@ def _lep_sweep(meeting_id: str, sweep: int) -> None:
         _bridge_persist()
         return
 
-    # sweep 4 — final majority
+    # sweep 4 — final majority (legacy only)
     with _lep_lock:
         st = _lep_meetings.get(meeting_id)
         if not st:
@@ -1185,6 +1206,14 @@ def _lep_cancel_timers(state: dict) -> None:
 
 
 def _lep_schedule_checkpoints(meeting_id: str, state: dict) -> None:
+    if _lep_redis.durable_lep_enabled():
+        # QStash owns timing — do not start in-process Timers for LEP.
+        state["timers"] = []
+        sys.stderr.write(
+            f"[lep/started] durable mode — skipping in-process timers "
+            f"meeting={meeting_id}\n"
+        )
+        return
     session_day = state.get("session_day", "Day 1")
     session_date = state.get("session_date", "")
     anchor = _lep_checkpoint_anchor(session_date)
@@ -1200,7 +1229,108 @@ def _lep_schedule_checkpoints(meeting_id: str, state: dict) -> None:
     )
 
 
-def _handle_lep_meeting_started(body: dict, forward_url: str) -> None:
+def _lep_sync_durable_started(
+    *,
+    zoom_account: str,
+    meeting_id: str,
+    topic: str,
+    start_time: str,
+    session_date: str,
+    session_day: str,
+    batch_date: str,
+    forward_url: str,
+) -> None:
+    if not _lep_redis.durable_lep_enabled():
+        return
+    sk = _lep_redis.session_key_for(batch_date, session_day)
+    _lep_redis.ensure_session_meta(
+        sk,
+        batch_date=batch_date,
+        session_day=session_day,
+        session_date=session_date,
+        topic=topic,
+        forward_url=forward_url,
+    )
+    _lep_redis.register_meeting(
+        sk,
+        zoom_account,
+        meeting_id,
+        topic=topic,
+        start_time=start_time,
+    )
+    sys.stderr.write(f"[lep/session] key={sk}\n")
+    try:
+        _lep_qstash.ensure_lep_schedule(
+            sk,
+            batch_date=batch_date,
+            session_day=session_day,
+            session_date=session_date,
+        )
+    except Exception as e:
+        sys.stderr.write(f"[lep/qstash] ensure schedule error: {e}\n")
+
+
+def _lep_sync_durable_join(
+    *,
+    zoom_account: str,
+    meeting_id: str,
+    email: str,
+    name: str,
+    participant: dict,
+    session_date: str,
+    session_day: str,
+    batch_date: str,
+    forward_url: str,
+    topic: str,
+    start_time: str,
+) -> None:
+    if not _lep_redis.durable_lep_enabled():
+        return
+    sk = _lep_redis.session_key_for(batch_date, session_day)
+    _lep_redis.ensure_session_meta(
+        sk,
+        batch_date=batch_date,
+        session_day=session_day,
+        session_date=session_date,
+        topic=topic,
+        forward_url=forward_url,
+    )
+    _lep_redis.register_meeting(
+        sk, zoom_account, meeting_id, topic=topic, start_time=start_time
+    )
+
+    zoom_pid = extract_zoom_participant_id(participant)
+    mapped_crm = ""
+    if zoom_pid:
+        mapped_crm = _lep_redis.get_participant_mapping(sk, meeting_id, zoom_pid)
+
+    if mapped_crm:
+        identity = f"crm:{mapped_crm}"
+        sys.stderr.write(
+            f"[lep/identity] zoom_pid={zoom_pid} reuse CRM={mapped_crm}\n"
+        )
+    else:
+        identity = participant_identity(name, email)
+        if not identity:
+            sys.stderr.write("[lep/identity] no email/name — skip Redis roster\n")
+            return
+
+    _lep_redis.roster_join(sk, zoom_account, meeting_id, identity)
+    _lep_redis.store_identity_display(sk, identity, name, email)
+    try:
+        _lep_qstash.ensure_lep_schedule(
+            sk,
+            batch_date=batch_date,
+            session_day=session_day,
+            session_date=session_date,
+        )
+    except Exception as e:
+        sys.stderr.write(f"[lep/qstash] ensure schedule error: {e}\n")
+
+
+def _handle_lep_meeting_started(
+    body: dict, forward_url: str, zoom_account: str = "zoom1"
+) -> None:
     obj = body.get("payload", {}).get("object", {})
     topic = obj.get("topic", "")
     if not _is_lep_topic(topic):
@@ -1211,6 +1341,7 @@ def _handle_lep_meeting_started(body: dict, forward_url: str) -> None:
     start_time = obj.get("start_time", "")
     session_date = _session_date_ist(start_time)
     session_day = _lep_session_day(topic, session_date)
+    batch = _batch_date(session_date, session_day)
 
     with _lep_lock:
         existing = _lep_meetings.get(meeting_id)
@@ -1229,8 +1360,9 @@ def _handle_lep_meeting_started(body: dict, forward_url: str) -> None:
             "start_time": start_time,
             "session_date": session_date,
             "session_day": session_day,
-            "batch_date": _batch_date(session_date, session_day),
+            "batch_date": batch,
             "forward_url": forward_url,
+            "zoom_account": zoom_account,
             "roster": roster,
             "ever_joined": ever_joined,
             "check_results": check_results,
@@ -1239,14 +1371,27 @@ def _handle_lep_meeting_started(body: dict, forward_url: str) -> None:
         _lep_schedule_checkpoints(meeting_id, state)
         _lep_meetings[meeting_id] = state
 
+    _lep_sync_durable_started(
+        zoom_account=zoom_account,
+        meeting_id=meeting_id,
+        topic=topic,
+        start_time=start_time,
+        session_date=session_date,
+        session_day=session_day,
+        batch_date=batch,
+        forward_url=forward_url,
+    )
+
     sys.stderr.write(
         f"[lep/started] {session_day} meeting={meeting_id} session={session_date} "
-        f"batch={_batch_date(session_date, session_day)} roster={len(roster)} anchor=9:00IST\n"
+        f"batch={batch} zoom={zoom_account} roster={len(roster)} anchor=9:00IST\n"
     )
     _bridge_persist()
 
 
-def _handle_lep_participant_joined(body: dict, forward_url: str) -> None:
+def _handle_lep_participant_joined(
+    body: dict, forward_url: str, zoom_account: str = "zoom1"
+) -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
@@ -1283,6 +1428,7 @@ def _handle_lep_participant_joined(body: dict, forward_url: str) -> None:
                 "session_day": session_day,
                 "batch_date": _batch_date(session_date, session_day),
                 "forward_url": forward_url,
+                "zoom_account": zoom_account,
                 "roster": {},
                 "ever_joined": {},
                 "check_results": {},
@@ -1290,23 +1436,53 @@ def _handle_lep_participant_joined(body: dict, forward_url: str) -> None:
             }
             _lep_meetings[meeting_id] = state
             _lep_schedule_checkpoints(meeting_id, state)
-            sys.stderr.write(
-                f"[lep/join] Roster + checkpoints recovered (no prior state) "
-                f"meeting={meeting_id}\n"
-            )
-        elif not state.get("timers"):
+            # Durable mode: empty RAM is OK — Redis holds history. Legacy: warn.
+            if _lep_redis.durable_lep_enabled():
+                sys.stderr.write(
+                    f"[lep/join] no prior RAM state meeting={meeting_id} "
+                    f"(durable Redis mode — OK)\n"
+                )
+            else:
+                sys.stderr.write(
+                    f"[lep/join] Roster + checkpoints recovered (no prior state) "
+                    f"meeting={meeting_id}\n"
+                )
+        elif not state.get("timers") and not _lep_redis.durable_lep_enabled():
             _lep_schedule_checkpoints(meeting_id, state)
             sys.stderr.write(f"[lep/join] Rescheduled empty timers meeting={meeting_id}\n")
 
         pinfo = {"email": email, "name": name, "join_time": join_time}
         state["roster"][rkey] = pinfo
         state.setdefault("ever_joined", {})[rkey] = pinfo
+        state["zoom_account"] = zoom_account
 
-    sys.stderr.write(f"[lep/join] Roster +1 {email or name} meeting={meeting_id}\n")
+        session_date = state["session_date"]
+        session_day = state["session_day"]
+        batch_date = state["batch_date"]
+        start_time = state.get("start_time", "")
+
+    _lep_sync_durable_join(
+        zoom_account=zoom_account,
+        meeting_id=meeting_id,
+        email=email,
+        name=name,
+        participant=participant if isinstance(participant, dict) else {},
+        session_date=session_date,
+        session_day=session_day,
+        batch_date=batch_date,
+        forward_url=forward_url,
+        topic=topic,
+        start_time=start_time,
+    )
+
+    sys.stderr.write(
+        f"[lep/join] Roster +1 {email or name} meeting={meeting_id} "
+        f"zoom={zoom_account}\n"
+    )
     _bridge_persist()
 
 
-def _handle_lep_participant_left(body: dict) -> None:
+def _handle_lep_participant_left(body: dict, zoom_account: str = "zoom1") -> None:
     obj = body.get("payload", {}).get("object", {})
     participant = obj.get("participant", {})
     meeting_id = str(obj.get("id", ""))
@@ -1321,6 +1497,8 @@ def _handle_lep_participant_left(body: dict) -> None:
     if not rkey:
         return
 
+    batch_date = ""
+    session_day = ""
     with _lep_lock:
         state = _lep_meetings.get(meeting_id)
         if state and rkey in state.get("roster", {}):
@@ -1328,10 +1506,30 @@ def _handle_lep_participant_left(body: dict) -> None:
             sys.stderr.write(
                 f"[lep/left] Roster -1 {email or name} meeting={meeting_id}\n"
             )
+        if state:
+            batch_date = state.get("batch_date", "")
+            session_day = state.get("session_day", "")
+            zoom_account = state.get("zoom_account") or zoom_account
+
+    if _lep_redis.durable_lep_enabled() and batch_date:
+        sk = _lep_redis.session_key_for(batch_date, session_day or "Day 1")
+        zoom_pid = extract_zoom_participant_id(
+            participant if isinstance(participant, dict) else {}
+        )
+        identity = ""
+        if zoom_pid:
+            crm = _lep_redis.get_participant_mapping(sk, meeting_id, zoom_pid)
+            if crm:
+                identity = f"crm:{crm}"
+        if not identity:
+            identity = participant_identity(name, email) or ""
+        if identity:
+            _lep_redis.roster_leave(sk, zoom_account, meeting_id, identity)
+
     _bridge_persist()
 
 
-def _handle_lep_meeting_ended(body: dict) -> None:
+def _handle_lep_meeting_ended(body: dict, zoom_account: str = "zoom1") -> None:
     obj = body.get("payload", {}).get("object", {})
     topic = obj.get("topic", "")
     meeting_id = str(obj.get("id", ""))
@@ -1340,13 +1538,24 @@ def _handle_lep_meeting_ended(body: dict) -> None:
         sys.stderr.write(f"[lep/ended] Not an LEP meeting (topic={topic!r}) — skipping\n")
         return
 
+    batch_date = ""
+    session_day = ""
     with _lep_lock:
         state = _lep_meetings.pop(meeting_id, None)
         if state:
             _lep_cancel_timers(state)
+            batch_date = state.get("batch_date", "")
+            session_day = state.get("session_day", "")
+            zoom_account = state.get("zoom_account") or zoom_account
+
+    if _lep_redis.durable_lep_enabled() and batch_date:
+        sk = _lep_redis.session_key_for(batch_date, session_day or "Day 1")
+        # Clear live roster only — checkpoint snapshots stay until TTL
+        _lep_redis.mark_meeting_inactive(sk, zoom_account, meeting_id)
+
     sys.stderr.write(
-        f"[lep/ended] {state.get('session_day', '?') if state else '?'} "
-        f"ended — timers cancelled (no CRM completion) meeting={meeting_id}\n"
+        f"[lep/ended] {session_day or '?'} ended — timers cancelled "
+        f"(no CRM completion) meeting={meeting_id}\n"
     )
     _bridge_persist()
 
@@ -1392,13 +1601,68 @@ def make_handler(
                 return self._secret_100bm, "100BM", self._forward_url_100bm
             return self._secret, "", self._forward_url
 
+        def _handle_internal_lep(self, raw: bytes) -> None:
+            """QStash callbacks: /internal/lep/checkpoint and /internal/lep/final."""
+            path = self.path.split("?", 1)[0].rstrip("/")
+            signature = self.headers.get("Upstash-Signature", "") or self.headers.get(
+                "upstash-signature", ""
+            )
+            base = _lep_qstash.public_base_url()
+            full_url = f"{base}{path}" if base else path
+            if not _lep_qstash.verify_qstash_request(signature, raw, full_url):
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"invalid qstash signature"}')
+                return
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            session_key = (body.get("session_key") or "").strip()
+            if not session_key:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"session_key required"}')
+                return
+
+            if path.endswith("/checkpoint"):
+                try:
+                    check_no = int(body.get("check", 0))
+                except (TypeError, ValueError):
+                    check_no = 0
+                result = execute_checkpoint(
+                    session_key, check_no, post_to_zoho=_post_to_zoho
+                )
+            elif path.endswith("/final"):
+                result = execute_final(session_key, post_to_zoho=_post_to_zoho)
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            payload = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(length) if length else b""
 
+            path = self.path.split("?", 1)[0].rstrip("/") or "/"
+            if path in ("/internal/lep/checkpoint", "/internal/lep/final"):
+                self._handle_internal_lep(raw)
+                return
+
             route = self._route()
             if route is None:
-                path = self.path.split("?", 1)[0].rstrip("/") or "/"
                 if path == "/100bm":
                     err = '{"error":"/100bm disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_100BM"}'
                 elif path.startswith("/lep"):
@@ -1438,14 +1702,15 @@ def make_handler(
                 return
 
             if program == "LEP":
+                zoom_account = zoom_account_from_path(path)
                 if event == "meeting.started":
-                    _handle_lep_meeting_started(body, route_forward)
+                    _handle_lep_meeting_started(body, route_forward, zoom_account)
                 elif event == "meeting.participant_joined":
-                    _handle_lep_participant_joined(body, route_forward)
+                    _handle_lep_participant_joined(body, route_forward, zoom_account)
                 elif event == "meeting.participant_left":
-                    _handle_lep_participant_left(body)
+                    _handle_lep_participant_left(body, zoom_account)
                 elif event == "meeting.ended":
-                    _handle_lep_meeting_ended(body)
+                    _handle_lep_meeting_ended(body, zoom_account)
                 else:
                     self._forward(raw, route_forward)
             elif program == "100BM":
@@ -1526,6 +1791,9 @@ def make_handler(
                 "route_100bm": bool(self._secret_100bm),
                 "route_lep": bool(self._lep_secrets),
                 "lep_routes": sorted(self._lep_secrets.keys()),
+                "lep_durable_redis": _lep_redis.durable_lep_enabled(),
+                "lep_qstash_configured": _lep_qstash.qstash_configured(),
+                "public_base_url": _lep_qstash.public_base_url() or None,
                 "bridge_state_persist": persist_enabled(),
                 "bridge_state_path": persist_path(),
                 "mlm_planned_start_enabled": os.environ.get("MC_USE_MLM_PLANNED_START", "1") not in ("0", "false", "no"),
@@ -1561,6 +1829,8 @@ def _load_lep_secrets() -> dict[str, str]:
 
 def main() -> None:
     _load_dotenv()
+    # Temporary Redis connectivity check (does not change LEP attendance).
+    _lep_redis.run_redis_connectivity_test()
     secret = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN", "").strip()
     secret_100bm = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_100BM", "").strip()
     secret_lep = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_LEP", "").strip()
@@ -1609,11 +1879,14 @@ def main() -> None:
         f"LEP topic keywords : {_lep_topic_keywords()}\n"
         f"100BM route        : {route_100bm}\n"
         f"LEP routes         : {route_lep}\n"
+        f"LEP durable        : redis={'on' if _lep_redis.durable_lep_enabled() else 'off'} "
+        f"qstash={'on' if _lep_qstash.qstash_configured() else 'off'}\n"
+        f"Public base URL    : {_lep_qstash.public_base_url() or '(unset)'}\n"
         f"State persistence  : {'on → ' + persist_path() if persist_enabled() else 'off'}\n"
         f"Forward URL        : {forward}\n"
         "MC /               : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
         "100BM /100bm       : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
-        "LEP /lep[/2/3/4]   : meeting.started → roster → 3 checks + majority final\n"
+        "LEP /lep[/2/3/4]   : legacy in-memory timers (set LEP_DURABLE=1 for Redis)\n"
         "meeting.ended      : MC Completed trigger only (no attendance at end)",
         flush=True,
     )

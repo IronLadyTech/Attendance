@@ -1,3 +1,7 @@
-# Minimal deps for tools/zoom_webhook_bridge.py (Docker / Railway)
+# Minimal deps for tools/zoom_webhook_bridge.py (Docker / Railway / Render)
 requests>=2.31.0
 python-dotenv>=1.0.0
+tzdata>=2024.1
+# Durable LEP attendance (Upstash Redis + QStash)
+upstash-redis>=1.0.0
+qstash>=2.0.0

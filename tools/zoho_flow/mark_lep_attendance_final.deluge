@@ -504,7 +504,7 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 		}
 	}
 
-	// Pass 3 — flexible name (CRM contains Zoom name, or same first name)
+	// Pass 3 — flexible name (contains) then UNIQUE first-name only
 	if(foundRecord == null && zoomNameNorm != "" && zoomNameNorm.length() >= 4)
 	{
 		zoomFirst = zoomNameNorm;
@@ -512,6 +512,7 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 		{
 			zoomFirst = zoomNameNorm.substring(0,zoomNameNorm.indexOf(" "));
 		}
+		// Pass 3a — CRM name contains full Zoom name (deterministic)
 		for each cand in cohortRecs
 		{
 			cName = cand.getJson("Name");
@@ -522,37 +523,93 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 			cNameNorm = cName.toString().toLowerCase().trim();
 			cNameNorm = cNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
 			cNameNorm = cNameNorm.replaceAll("  "," ").trim();
-			nameHit = false;
 			if(cNameNorm.contains(zoomNameNorm))
-			{
-				nameHit = true;
-				matchHow = "name-contains";
-			}
-			else if(zoomFirst.length() >= 4)
-			{
-				if(cNameNorm == zoomFirst)
-				{
-					nameHit = true;
-					matchHow = "name-first";
-				}
-				else if(cNameNorm.length() > zoomFirst.length())
-				{
-					prefix = cNameNorm.substring(0,zoomFirst.length());
-					nextCh = cNameNorm.substring(zoomFirst.length(),zoomFirst.length() + 1);
-					if(prefix == zoomFirst && nextCh == " ")
-					{
-						nameHit = true;
-						matchHow = "name-first";
-					}
-				}
-			}
-			if(nameHit)
 			{
 				foundRecord = cand;
 				matchedCohort = true;
+				matchHow = "name-contains";
 				break;
 			}
 		}
+	}
+
+	// Pass 3b — first-name fallback ONLY if exactly one cohort candidate
+	ambiguousMatch = false;
+	if(foundRecord == null && zoomNameNorm != "" && zoomNameNorm.length() >= 4)
+	{
+		zoomFirst = zoomNameNorm;
+		if(zoomNameNorm.contains(" "))
+		{
+			zoomFirst = zoomNameNorm.substring(0,zoomNameNorm.indexOf(" "));
+		}
+		firstMatches = List();
+		if(zoomFirst.length() >= 4)
+		{
+			for each cand in cohortRecs
+			{
+				cName = cand.getJson("Name");
+				if(cName == null)
+				{
+					continue;
+				}
+				cNameNorm = cName.toString().toLowerCase().trim();
+				cNameNorm = cNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
+				cNameNorm = cNameNorm.replaceAll("  "," ").trim();
+				cFirst = cNameNorm;
+				if(cNameNorm.contains(" "))
+				{
+					cFirst = cNameNorm.substring(0,cNameNorm.indexOf(" "));
+				}
+				if(cFirst == zoomFirst)
+				{
+					firstMatches.add(cand);
+				}
+			}
+		}
+		if(firstMatches.size() == 1)
+		{
+			foundRecord = firstMatches.get(0);
+			matchedCohort = true;
+			matchHow = "first-name-unique";
+		}
+		else if(firstMatches.size() > 1)
+		{
+			ambiguousMatch = true;
+			matchHow = "first-name-ambiguous";
+			info "LEP: ambiguous first name=" + zoomFirst + " candidates=" + firstMatches.size();
+		}
+	}
+
+	// Ambiguous first-name: do NOT fall through to API search (wrong person risk)
+	if(ambiguousMatch)
+	{
+		info "LEP: ambiguous participant - refusing automatic update name=" + zoomNameNorm;
+		safe_name = "";
+		if(participant_name != null)
+		{
+			safe_name = participant_name.replaceAll("\"","'");
+		}
+		safe_email = "";
+		if(participant_email != null)
+		{
+			safe_email = participant_email.replaceAll("\"","'");
+		}
+		timestamp_str = zoho.currenttime.toString("yyyy-MM-dd HH:mm:ss");
+		json_data_str = '[{"Timestamp":"' + timestamp_str + '","Name":"' + safe_name + '","Email":"' + safe_email + '","Session":"LEP AMBIGUOUS first-name","Duration (mins)":"0"}]';
+		sheet_param = Map();
+		sheet_param.put("method","worksheet.jsondata.append");
+		sheet_param.put("worksheet_name","Sheet1");
+		sheet_param.put("header_row","1");
+		sheet_param.put("json_data",json_data_str);
+		sheet_response = invokeurl
+		[
+			url :"https://sheet.zoho.in/api/v2/6n2nqc1869b674fcd4c47a645f30a6f38fb05"
+			type :POST
+			parameters:sheet_param
+			connection:"zoho_sheet_mc"
+		];
+		info "LEP ambiguous sheet response=" + sheet_response.toString();
+		return;
 	}
 
 	// Pass 4 — API search fallback (any module record) if cohort scan missed

@@ -125,14 +125,18 @@ At final, `present_emails` / `present_names` = everyone who **ever joined** Zoom
 |----------|---------|
 | `ZOOM_WEBHOOK_SECRET_TOKEN_LEP` | Zoom account 1 → `/lep` |
 | `ZOHO_WEBHOOK_FORWARD_URL_LEP` | This Flow webhook |
-| `BRIDGE_STATE_PATH` | Persist roster/checks |
+| `UPSTASH_REDIS_REST_URL` / `TOKEN` | Durable C1/C2/C3 + four-room rosters |
+| `QSTASH_TOKEN` + signing keys | Check/Final timing (survives Render restart) |
+| `PUBLIC_BASE_URL` | Render URL for `/internal/lep/checkpoint` + `/final` |
 | `ZOOM_WEBHOOK_SECRET_TOKEN_LEP_2` | Zoom account 2 → `/lep2` (optional) |
 | `ZOOM_WEBHOOK_SECRET_TOKEN_LEP_3` | Zoom account 3 → `/lep3` (optional) |
 | `ZOOM_WEBHOOK_SECRET_TOKEN_LEP_4` | Zoom account 4 → `/lep4` (optional) |
 
 All LEP accounts share the same Zoho Flow. Accepted topic substrings (any one): `il lep sessions`, `il lep`, `ironlady lep`, `lep day`, `2 day session`. Override with Render env `LEP_TOPIC_KEYWORDS`.
 
-Redeploy Render after bridge changes (adds `present_names` + `lep_final_batch` + `/lep2`–`/lep4`).
+**Critical:** Checkpoints UNION all four rooms before Zoho batch Absent. Paste updated `mark_lep_attendance_final` (unique first-name).
+
+Redeploy Render after bridge + Redis/QStash env are set.
 
 ## No Day 2 blueprint
 

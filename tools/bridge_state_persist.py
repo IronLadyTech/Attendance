@@ -4,18 +4,25 @@ do not lose roster, ever_joined, or LEP check_results.
 
 Set BRIDGE_STATE_PATH (default /tmp/bridge_meetings.json).
 Set BRIDGE_STATE_PERSIST=0 to disable.
+
+On Render: attach a persistent Disk and point BRIDGE_STATE_PATH at it
+(e.g. /var/data/bridge_meetings.json). Plain /tmp is wiped on every redeploy
+and concurrent join/leave used to race on the same .tmp filename.
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 _PERSIST_ENABLED = os.environ.get("BRIDGE_STATE_PERSIST", "1").strip().lower() not in ("0", "false", "no")
 _STATE_PATH = os.environ.get("BRIDGE_STATE_PATH", "/tmp/bridge_meetings.json").strip()
+_SAVE_LOCK = threading.Lock()
 
 
 def persist_path() -> str:
@@ -65,16 +72,35 @@ def save_meetings(
         "lep": {mid: serialize_meeting_state(st) for mid, st in lep.items()},
     }
     path = _STATE_PATH
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    tmp = path + ".tmp"
+    parent = os.path.dirname(path) or "."
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, separators=(",", ":"))
-        os.replace(tmp, path)
+        os.makedirs(parent, exist_ok=True)
     except OSError as e:
-        sys.stderr.write(f"[persist] ERROR writing {path}: {e}\n")
+        sys.stderr.write(f"[persist] ERROR mkdir {parent}: {e}\n")
+        return
+
+    # Serialize writers + unique tmp name so parallel join/leave cannot
+    # delete each other's .tmp before os.replace.
+    with _SAVE_LOCK:
+        tmp: str | None = None
+        try:
+            fd, tmp = tempfile.mkstemp(
+                prefix="bridge_meetings_",
+                suffix=".json.tmp",
+                dir=parent,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, separators=(",", ":"))
+            os.replace(tmp, path)
+            tmp = None
+        except OSError as e:
+            sys.stderr.write(f"[persist] ERROR writing {path}: {e}\n")
+        finally:
+            if tmp and os.path.isfile(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
 
 def load_meetings() -> tuple[dict[str, dict], dict[str, dict], dict[str, dict]]:
