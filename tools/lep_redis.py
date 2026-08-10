@@ -25,6 +25,27 @@ def redis_configured() -> bool:
     )
 
 
+def _strip_redis_env() -> None:
+    """Normalize URL/token (Render paste often adds spaces/newlines)."""
+    for key in ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"):
+        raw = os.environ.get(key)
+        if raw is None:
+            continue
+        cleaned = raw.strip().strip('"').strip("'")
+        if cleaned != raw:
+            os.environ[key] = cleaned
+
+
+def _safe_redis_error(exc: BaseException) -> str:
+    """Exception text with URL/token redacted — never log credentials."""
+    msg = f"{type(exc).__name__}: {exc}"
+    for key in ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"):
+        val = os.environ.get(key, "")
+        if val and val in msg:
+            msg = msg.replace(val, f"<{key}>")
+    return msg[:240]
+
+
 def get_redis():
     """Reusable Upstash Redis client from env (no hard-coded credentials)."""
     global _redis, _redis_init_attempted
@@ -42,6 +63,7 @@ def get_redis():
             "[lep/redis] upstash_redis not installed — Redis client unavailable\n"
         )
         return None
+    _strip_redis_env()
     # Official: reads UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN
     _redis = Redis.from_env()
     return _redis
@@ -74,6 +96,14 @@ def run_redis_connectivity_test() -> bool:
         )
         return False
     try:
+        _strip_redis_env()
+        url = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+        if not url.startswith("https://"):
+            sys.stderr.write(
+                "[lep/redis-test] failed — URL must start with https:// "
+                "(use REST URL from Upstash console, not redis://)\n"
+            )
+            return False
         r = get_redis()
         if r is None:
             sys.stderr.write("[lep/redis-test] failed — client unavailable\n")
@@ -81,14 +111,19 @@ def run_redis_connectivity_test() -> bool:
         key = "lep:test:connection"
         r.set(key, "working", ex=60)
         value = r.get(key)
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if value is not None:
+            value = str(value)
         if value == "working":
             sys.stderr.write("[lep/redis-test] working\n")
             return True
-        sys.stderr.write("[lep/redis-test] failed — unexpected value\n")
+        sys.stderr.write(
+            f"[lep/redis-test] failed — unexpected value type={type(value).__name__}\n"
+        )
         return False
     except Exception as e:
-        # Do not include env secrets; exception text from Upstash is usually safe.
-        sys.stderr.write(f"[lep/redis-test] failed — {type(e).__name__}\n")
+        sys.stderr.write(f"[lep/redis-test] failed — {_safe_redis_error(e)}\n")
         return False
 
 
