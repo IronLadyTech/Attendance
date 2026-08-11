@@ -1868,6 +1868,11 @@ def main() -> None:
     route_lep = (
         f"enabled {sorted(lep_secrets.keys())}" if lep_secrets else "disabled"
     )
+    lep_mode_line = (
+        "LEP /lep[/2/3/4]   : Redis rosters + QStash Check1/2/3/Final (durable)\n"
+        if _lep_redis.durable_lep_enabled()
+        else "LEP /lep[/2/3/4]   : legacy in-memory timers (set LEP_DURABLE=1 for Redis)\n"
+    )
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
         f"MC checkpoints     : T+{_MC_CHECKPOINT_1}s (first), T+{_MC_CHECKPOINT_2}s (final), T+{_MC_CHECKPOINT_3}s (hour)\n"
@@ -1886,7 +1891,7 @@ def main() -> None:
         f"Forward URL        : {forward}\n"
         "MC /               : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
         "100BM /100bm       : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
-        "LEP /lep[/2/3/4]   : legacy in-memory timers (set LEP_DURABLE=1 for Redis)\n"
+        f"{lep_mode_line}"
         "meeting.ended      : MC Completed trigger only (no attendance at end)",
         flush=True,
     )
