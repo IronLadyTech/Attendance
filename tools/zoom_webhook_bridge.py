@@ -1285,13 +1285,14 @@ def _lep_sync_durable_started(
         raise RuntimeError(f"redis session/meeting write failed session={sk}")
     sys.stderr.write(f"[lep/session] key={sk}\n")
     try:
-        _lep_qstash.ensure_lep_schedule(
+        status = _lep_qstash.ensure_lep_schedule(
             sk,
             batch_date=batch_date,
             session_day=session_day,
             session_date=session_date,
         )
-        _lep_schedule_ensured.add(sk)
+        if status in ("created", "exists", "disabled"):
+            _lep_schedule_ensured.add(sk)
     except Exception as e:
         sys.stderr.write(f"[lep/qstash] ensure schedule error: {e}\n")
 
@@ -1353,13 +1354,17 @@ def _lep_sync_durable_join(
 
     if sk not in _lep_schedule_ensured:
         try:
-            _lep_qstash.ensure_lep_schedule(
+            status = _lep_qstash.ensure_lep_schedule(
                 sk,
                 batch_date=batch_date,
                 session_day=session_day,
                 session_date=session_date,
             )
-            _lep_schedule_ensured.add(sk)
+            # Only stop asking once a schedule really exists. Caching an
+            # "unconfigured" result would silence the one warning that says
+            # this session's checkpoints will never fire.
+            if status in ("created", "exists", "disabled"):
+                _lep_schedule_ensured.add(sk)
         except Exception as e:
             sys.stderr.write(f"[lep/qstash] ensure schedule error: {e}\n")
 
@@ -1922,6 +1927,22 @@ def main() -> None:
     forward = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL", "").strip()
     forward_100bm = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL_100BM", "").strip()
     forward_lep = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL_LEP", "").strip()
+
+    # Durable LEP without QStash records rosters but fires no checkpoints — the
+    # failure is silent and only surfaces days later as missing attendance.
+    if _lep_redis.durable_lep_enabled():
+        missing = [n for n in ("QSTASH_TOKEN", "PUBLIC_BASE_URL")
+                   if not os.environ.get(n, "").strip()]
+        if missing:
+            print(
+                "\n" + "!" * 72 +
+                "\n!! LEP_DURABLE is on but " + " and ".join(missing) +
+                (" are unset." if len(missing) > 1 else " is unset.") +
+                "\n!! No checkpoint will fire. Rosters will be recorded, attendance"
+                "\n!! will NOT be, and nothing else will report this.\n" +
+                "!" * 72 + "\n",
+                file=sys.stderr, flush=True,
+            )
 
     if not secret:
         print("ERROR: Set ZOOM_WEBHOOK_SECRET_TOKEN", file=sys.stderr)

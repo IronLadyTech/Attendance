@@ -40,40 +40,52 @@ def ensure_lep_schedule(
     batch_date: str,
     session_day: str,
     session_date: str,
-) -> bool:
+) -> str:
     """
     Create at most one QStash schedule per LEP session (four Zoom starts → one schedule).
 
-    Returns True if this process created the schedule.
+    Returns one of:
+      "created"      this process created it
+      "exists"       another process already claimed it
+      "unconfigured" QSTASH_TOKEN / PUBLIC_BASE_URL missing — NO checkpoint will
+                     ever fire for this session; callers must keep retrying and
+                     must not cache this as done
+      "disabled"     durable mode off
+    Raises if publishing fails partway (the claim is released first).
     """
     import lep_redis as lr
 
     if not lr.durable_lep_enabled():
-        return False
+        return "disabled"
     if not qstash_configured():
         sys.stderr.write(
-            f"[lep/qstash] QSTASH_TOKEN missing — cannot schedule session={session_key}\n"
+            f"[lep/qstash] ERROR QSTASH_TOKEN missing — NO checkpoints will run "
+            f"for session={session_key}; attendance will not be recorded\n"
         )
-        return False
+        return "unconfigured"
     base = public_base_url()
     if not base:
         sys.stderr.write(
-            f"[lep/qstash] PUBLIC_BASE_URL missing — cannot schedule session={session_key}\n"
+            f"[lep/qstash] ERROR PUBLIC_BASE_URL missing — NO checkpoints will run "
+            f"for session={session_key}; attendance will not be recorded\n"
         )
-        return False
+        return "unconfigured"
 
     if not lr.try_claim_schedule(session_key):
         sys.stderr.write(
             f"[lep/qstash] schedule already exists session={session_key}\n"
         )
-        return False
+        return "exists"
 
     try:
         from qstash import QStash
     except ImportError:
-        sys.stderr.write("[lep/qstash] qstash package not installed\n")
+        sys.stderr.write(
+            "[lep/qstash] ERROR qstash package not installed — NO checkpoints "
+            f"will run for session={session_key}\n"
+        )
         lr.clear_schedule_claim(session_key)
-        return False
+        return "unconfigured"
 
     token = os.environ["QSTASH_TOKEN"].strip()
     client = QStash(token)
@@ -121,7 +133,7 @@ def ensure_lep_schedule(
 
         lr.mark_schedule_created(session_key)
         sys.stderr.write(f"[lep/qstash] schedule created session={session_key}\n")
-        return True
+        return "created"
     except Exception as e:
         sys.stderr.write(f"[lep/qstash] schedule FAILED session={session_key}: {e}\n")
         lr.clear_schedule_claim(session_key)

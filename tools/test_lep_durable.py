@@ -136,6 +136,53 @@ class TestSessionDayFromTopic(unittest.TestCase):
         self.assertEqual(b, "Day 2")
 
 
+class TestScheduleStatusNotCached(unittest.TestCase):
+    """An unconfigured schedule must keep warning, never be cached as done."""
+
+    def setUp(self):
+        import zoom_webhook_bridge as bridge
+        import lep_qstash as q
+        self.bridge, self.q = bridge, q
+        self._real = q.ensure_lep_schedule
+        bridge._lep_schedule_ensured.clear()
+
+    def tearDown(self):
+        self.q.ensure_lep_schedule = self._real
+        self.bridge._lep_schedule_ensured.clear()
+
+    def _run(self, status):
+        calls = []
+
+        def fake(sk, **kw):
+            calls.append(sk)
+            return status
+        self.q.ensure_lep_schedule = fake
+        os.environ["LEP_DURABLE"] = "1"
+        os.environ["UPSTASH_REDIS_REST_URL"] = "https://fake"
+        os.environ["UPSTASH_REDIS_REST_TOKEN"] = "fake"
+        os.environ["BRIDGE_STATE_PERSIST"] = "0"
+        import lep_redis as lr
+        lr._redis = _FakeRedis([])
+        lr._redis_init_attempted = True
+        for _ in range(3):
+            self.bridge._lep_sync_durable_join(
+                zoom_account="zoom1", meeting_id="1", email="", name="A B",
+                participant={}, session_date="2026-08-22", session_day="Day 1",
+                batch_date="2026-08-22", forward_url="u",
+                topic="IL LEP Sessions", start_time="")
+        return calls
+
+    def test_unconfigured_retries_every_join(self):
+        self.assertEqual(len(self._run("unconfigured")), 3,
+                         "a missing QSTASH_TOKEN must keep warning on every join")
+
+    def test_created_is_cached(self):
+        self.assertEqual(len(self._run("created")), 1)
+
+    def test_exists_is_cached(self):
+        self.assertEqual(len(self._run("exists")), 1)
+
+
 class _FakePipe:
     """Records queued commands; exec() counts as one HTTP round-trip."""
 
