@@ -57,6 +57,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -131,6 +132,11 @@ _100bm_lock = threading.Lock()
 # LEP per-meeting roster + checkpoint timers + check history
 _lep_meetings: dict[str, dict] = {}
 _lep_lock = threading.Lock()
+
+# Sessions whose QStash schedule this process already resolved. Redis holds the
+# durable claim (try_claim_schedule); this only saves a REST round-trip on every
+# single join. A stale/missing entry costs one extra claim attempt, nothing more.
+_lep_schedule_ensured: set[str] = set()
 
 
 def _bridge_persist() -> None:
@@ -1243,6 +1249,7 @@ def _lep_sync_durable_started(
     if not _lep_redis.durable_lep_enabled():
         return
     sk = _lep_redis.session_key_for(batch_date, session_day)
+    batch = _lep_redis.pipeline()
     _lep_redis.ensure_session_meta(
         sk,
         batch_date=batch_date,
@@ -1250,6 +1257,7 @@ def _lep_sync_durable_started(
         session_date=session_date,
         topic=topic,
         forward_url=forward_url,
+        batch=batch,
     )
     _lep_redis.register_meeting(
         sk,
@@ -1257,7 +1265,10 @@ def _lep_sync_durable_started(
         meeting_id,
         topic=topic,
         start_time=start_time,
+        batch=batch,
     )
+    if not _lep_redis.pipeline_exec(batch):
+        raise RuntimeError(f"redis session/meeting write failed session={sk}")
     sys.stderr.write(f"[lep/session] key={sk}\n")
     try:
         _lep_qstash.ensure_lep_schedule(
@@ -1266,6 +1277,7 @@ def _lep_sync_durable_started(
             session_day=session_day,
             session_date=session_date,
         )
+        _lep_schedule_ensured.add(sk)
     except Exception as e:
         sys.stderr.write(f"[lep/qstash] ensure schedule error: {e}\n")
 
@@ -1287,18 +1299,10 @@ def _lep_sync_durable_join(
     if not _lep_redis.durable_lep_enabled():
         return
     sk = _lep_redis.session_key_for(batch_date, session_day)
-    _lep_redis.ensure_session_meta(
-        sk,
-        batch_date=batch_date,
-        session_day=session_day,
-        session_date=session_date,
-        topic=topic,
-        forward_url=forward_url,
-    )
-    _lep_redis.register_meeting(
-        sk, zoom_account, meeting_id, topic=topic, start_time=start_time
-    )
 
+    # Read first (its result picks the identity), then queue every write on one
+    # batch. Attendance still lands before we ack, so a failure here 500s and
+    # Zoom redelivers — the join can never be silently dropped.
     zoom_pid = extract_zoom_participant_id(participant)
     mapped_crm = ""
     if zoom_pid:
@@ -1313,19 +1317,37 @@ def _lep_sync_durable_join(
         identity = participant_identity(name, email)
         if not identity:
             sys.stderr.write("[lep/identity] no email/name — skip Redis roster\n")
-            return
 
-    _lep_redis.roster_join(sk, zoom_account, meeting_id, identity)
-    _lep_redis.store_identity_display(sk, identity, name, email)
-    try:
-        _lep_qstash.ensure_lep_schedule(
-            sk,
-            batch_date=batch_date,
-            session_day=session_day,
-            session_date=session_date,
-        )
-    except Exception as e:
-        sys.stderr.write(f"[lep/qstash] ensure schedule error: {e}\n")
+    batch = _lep_redis.pipeline()
+    _lep_redis.ensure_session_meta(
+        sk,
+        batch_date=batch_date,
+        session_day=session_day,
+        session_date=session_date,
+        topic=topic,
+        forward_url=forward_url,
+        batch=batch,
+    )
+    _lep_redis.register_meeting(
+        sk, zoom_account, meeting_id, topic=topic, start_time=start_time, batch=batch
+    )
+    if identity:
+        _lep_redis.roster_join(sk, zoom_account, meeting_id, identity, batch=batch)
+        _lep_redis.store_identity_display(sk, identity, name, email, batch=batch)
+    if not _lep_redis.pipeline_exec(batch):
+        raise RuntimeError(f"redis join write failed session={sk} identity={identity}")
+
+    if sk not in _lep_schedule_ensured:
+        try:
+            _lep_qstash.ensure_lep_schedule(
+                sk,
+                batch_date=batch_date,
+                session_day=session_day,
+                session_date=session_date,
+            )
+            _lep_schedule_ensured.add(sk)
+        except Exception as e:
+            sys.stderr.write(f"[lep/qstash] ensure schedule error: {e}\n")
 
 
 def _handle_lep_meeting_started(
@@ -1524,7 +1546,14 @@ def _handle_lep_participant_left(body: dict, zoom_account: str = "zoom1") -> Non
         if not identity:
             identity = participant_identity(name, email) or ""
         if identity:
-            _lep_redis.roster_leave(sk, zoom_account, meeting_id, identity)
+            batch = _lep_redis.pipeline()
+            _lep_redis.roster_leave(
+                sk, zoom_account, meeting_id, identity, batch=batch
+            )
+            if not _lep_redis.pipeline_exec(batch):
+                raise RuntimeError(
+                    f"redis leave write failed session={sk} identity={identity}"
+                )
 
     _bridge_persist()
 
@@ -1562,6 +1591,17 @@ def _handle_lep_meeting_ended(body: dict, zoom_account: str = "zoom1") -> None:
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        """A caller hanging up mid-response is normal — don't dump a traceback."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, TimeoutError)):
+            sys.stderr.write(
+                f"[bridge] client {client_address[0]} disconnected mid-response "
+                f"({type(exc).__name__}) — request already handled\n"
+            )
+            return
+        super().handle_error(request, client_address)
 
 
 def make_handler(
@@ -1701,48 +1741,81 @@ def make_handler(
                 self.wfile.write(payload)
                 return
 
-            if program == "LEP":
-                zoom_account = zoom_account_from_path(path)
-                if event == "meeting.started":
-                    _handle_lep_meeting_started(body, route_forward, zoom_account)
-                elif event == "meeting.participant_joined":
-                    _handle_lep_participant_joined(body, route_forward, zoom_account)
-                elif event == "meeting.participant_left":
-                    _handle_lep_participant_left(body, zoom_account)
-                elif event == "meeting.ended":
-                    _handle_lep_meeting_ended(body, zoom_account)
+            # Handlers commit attendance BEFORE we ack. If one raises, answer 500
+            # so Zoom redelivers the event — never ack work that did not land.
+            try:
+                if program == "LEP":
+                    zoom_account = zoom_account_from_path(path)
+                    if event == "meeting.started":
+                        _handle_lep_meeting_started(body, route_forward, zoom_account)
+                    elif event == "meeting.participant_joined":
+                        _handle_lep_participant_joined(
+                            body, route_forward, zoom_account
+                        )
+                    elif event == "meeting.participant_left":
+                        _handle_lep_participant_left(body, zoom_account)
+                    elif event == "meeting.ended":
+                        _handle_lep_meeting_ended(body, zoom_account)
+                    else:
+                        self._forward(raw, route_forward)
+                        return
+                elif program == "100BM":
+                    if event == "meeting.started":
+                        _handle_100bm_meeting_started(body, route_forward)
+                    elif event == "meeting.participant_joined":
+                        _handle_100bm_participant_joined(body, route_forward)
+                    elif event == "meeting.participant_left":
+                        _handle_100bm_participant_left(body)
+                    elif event == "meeting.ended":
+                        _handle_meeting_ended(body, route_forward, program)
+                    else:
+                        self._forward(raw, route_forward)
+                        return
                 else:
-                    self._forward(raw, route_forward)
-            elif program == "100BM":
-                if event == "meeting.started":
-                    _handle_100bm_meeting_started(body, route_forward)
-                elif event == "meeting.participant_joined":
-                    _handle_100bm_participant_joined(body, route_forward)
-                elif event == "meeting.participant_left":
-                    _handle_100bm_participant_left(body)
-                elif event == "meeting.ended":
-                    _handle_meeting_ended(body, route_forward, program)
-                else:
-                    self._forward(raw, route_forward)
-            else:
-                if event == "meeting.started":
-                    _handle_meeting_started(body, route_forward)
-                elif event == "meeting.participant_joined":
-                    _handle_mc_participant_joined(body, route_forward)
-                elif event == "meeting.participant_left":
-                    _handle_mc_participant_left(body)
-                elif event == "meeting.ended":
-                    _handle_meeting_ended(body, route_forward, program)
-                else:
-                    self._forward(raw, route_forward)
+                    if event == "meeting.started":
+                        _handle_meeting_started(body, route_forward)
+                    elif event == "meeting.participant_joined":
+                        _handle_mc_participant_joined(body, route_forward)
+                    elif event == "meeting.participant_left":
+                        _handle_mc_participant_left(body)
+                    elif event == "meeting.ended":
+                        _handle_meeting_ended(body, route_forward, program)
+                    else:
+                        self._forward(raw, route_forward)
+                        return
+            except Exception:
+                sys.stderr.write(
+                    f"[bridge] handler FAILED program={program or 'MC'} "
+                    f"event={event} path={path} — asking Zoom to retry\n"
+                    f"{traceback.format_exc()}"
+                )
+                self._send_json(500, b'{"error":"handler failed, retry"}')
+                return
 
             self._ok()
 
+        def _send_json(self, code: int, payload: bytes) -> None:
+            """
+            Write a response, tolerating a caller that already hung up.
+
+            The handler runs before this, so a dead socket means the work is
+            already committed — log it, don't raise.
+            """
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except (ConnectionError, TimeoutError) as e:
+                # BrokenPipe (Linux) / ConnectionAborted (Windows) / reset — same cause.
+                sys.stderr.write(
+                    f"[bridge] client hung up before ack path={self.path} "
+                    f"code={code} ({type(e).__name__}) — work already committed\n"
+                )
+
         def _ok(self) -> None:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"ok":true}')
+            self._send_json(200, b'{"ok":true}')
 
         def _forward(self, raw: bytes, forward_url: str) -> None:
             try:
@@ -1752,15 +1825,12 @@ def make_handler(
                     headers={"Content-Type": "application/json"},
                     timeout=60,
                 )
-                self.send_response(r.status_code if r.status_code < 500 else 502)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"forwarded":true}')
+                self._send_json(
+                    r.status_code if r.status_code < 500 else 502,
+                    b'{"forwarded":true}',
+                )
             except requests.RequestException as e:
-                self.send_response(502)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode())
+                self._send_json(502, json.dumps({"error": str(e)}).encode())
 
         def do_HEAD(self) -> None:
             self.send_response(200)

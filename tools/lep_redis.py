@@ -69,6 +69,51 @@ def get_redis():
     return _redis
 
 
+def pipeline():
+    """
+    Batch handle for multi-command writes — one HTTP round-trip on exec.
+
+    Zoom gives a webhook ~3s; issuing each SADD/HSET/EXPIRE as its own REST
+    call blew past that and the proxy hung up mid-response. Callers queue
+    every write for one event on a batch, then flush once.
+
+    Falls back to the plain client (immediate execution) when the installed
+    SDK has no pipeline support, so callers need no branching.
+    """
+    r = get_redis()
+    if r is None:
+        return None
+    make = getattr(r, "pipeline", None)
+    if not callable(make):
+        return r
+    try:
+        return make()
+    except Exception as e:
+        sys.stderr.write(f"[lep/redis] pipeline unavailable — {_safe_redis_error(e)}\n")
+        return r
+
+
+def pipeline_exec(batch) -> bool:
+    """
+    Flush a pipeline handle. True if the batch reached Redis.
+
+    No-op True for the immediate-mode fallback, where commands already ran.
+    A False here means attendance was NOT recorded — callers must fail the
+    request so Zoom redelivers rather than silently dropping the event.
+    """
+    if batch is None:
+        return False
+    flush = getattr(batch, "exec", None)
+    if not callable(flush):
+        return True
+    try:
+        flush()
+        return True
+    except Exception as e:
+        sys.stderr.write(f"[lep/redis] pipeline exec failed — {_safe_redis_error(e)}\n")
+        return False
+
+
 def durable_lep_enabled() -> bool:
     """
     Attendance durable mode (Redis rosters / QStash) — opt-in.
@@ -196,8 +241,9 @@ def ensure_session_meta(
     session_date: str,
     topic: str,
     forward_url: str,
+    batch=None,
 ) -> None:
-    r = get_redis()
+    r = batch if batch is not None else get_redis()
     if not r:
         return
     key = session_meta_key(session_key)
@@ -229,8 +275,9 @@ def register_meeting(
     *,
     topic: str,
     start_time: str,
+    batch=None,
 ) -> None:
-    r = get_redis()
+    r = batch if batch is not None else get_redis()
     if not r:
         return
     mk = meetings_key(session_key)
@@ -274,8 +321,9 @@ def roster_join(
     zoom_account: str,
     meeting_id: str,
     identity: str,
+    batch=None,
 ) -> None:
-    r = get_redis()
+    r = batch if batch is not None else get_redis()
     if not r or not identity:
         return
     cur = meeting_current_key(session_key, zoom_account, meeting_id)
@@ -294,8 +342,9 @@ def roster_leave(
     zoom_account: str,
     meeting_id: str,
     identity: str,
+    batch=None,
 ) -> None:
-    r = get_redis()
+    r = batch if batch is not None else get_redis()
     if not r or not identity:
         return
     cur = meeting_current_key(session_key, zoom_account, meeting_id)
@@ -524,9 +573,15 @@ def identities_to_present_csvs(identities: set[str]) -> tuple[str, str]:
     return ",".join(emails), ",".join(names)
 
 
-def store_identity_display(session_key: str, identity: str, display_name: str, email: str) -> None:
+def store_identity_display(
+    session_key: str,
+    identity: str,
+    display_name: str,
+    email: str,
+    batch=None,
+) -> None:
     """Remember display name/email for an identity so Zoho batch can use names."""
-    r = get_redis()
+    r = batch if batch is not None else get_redis()
     if not r or not identity:
         return
     key = f"{session_key}:idmeta:{identity}"
