@@ -14,6 +14,7 @@ Needs UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN in the environment
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sys
 
@@ -73,6 +74,7 @@ def main() -> int:
     ap.add_argument("--date", help="session date YYYY-MM-DD (with --day)")
     ap.add_argument("--day", choices=["1", "2"], help="1 or 2 (with --date)")
     ap.add_argument("--who", help="only rows whose name/email/identity contains this")
+    ap.add_argument("--csv", metavar="PATH", help="also write the table to a CSV file")
     args = ap.parse_args()
 
     if args.session:
@@ -141,6 +143,20 @@ def main() -> int:
     print("  " + "-" * 78)
     for label, _ident, c1, c2, c3, final in rows:
         print(f"  {label[:38]:<38} {c1:<8} {c2:<8} {c3:<8} {final}")
+
+    if args.csv:
+        # utf-8-sig so Excel on Windows renders names like "Namita’s" correctly.
+        with open(args.csv, "w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.writer(fh)
+            w.writerow(["name", "email", "identity", "check_1", "check_2",
+                        "check_3", "final", "session"])
+            for label, ident, c1, c2, c3, final in rows:
+                disp = lr.load_identity_display(session_key, ident)
+                w.writerow([
+                    disp.get("display_name", ""), disp.get("email", ""), ident,
+                    c1, c2, c3, final, session_key,
+                ])
+        print(f"\nwrote {len(rows)} rows to {os.path.abspath(args.csv)}")
 
     tally: dict[str, int] = {}
     for *_rest, final in rows:
