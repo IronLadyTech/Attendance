@@ -3,6 +3,9 @@ credentials.json
 zoom_config.json
 .streamlit/secrets.toml
 
+# Attendance exports — participant names and emails, never commit these
+*.csv
+
 # Python
 __pycache__/
 *.py[cod]
