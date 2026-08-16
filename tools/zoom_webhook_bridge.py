@@ -54,6 +54,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -226,13 +227,26 @@ def _is_lep_topic(topic: str) -> bool:
     return any(kw in topic_l for kw in _lep_topic_keywords())
 
 
+_LEP_BOTH_DAYS = re.compile(
+    r"days?\s*1\s*(?:[-–—&/,]|and|to|&amp;)\s*2|\b1\s*(?:&|and)\s*2\s*days?\b"
+)
+
+
 def _lep_session_day(topic: str, session_date: str = "") -> str:
-    """Day 1 = Saturday; Day 2 = Sunday. Topic hint overrides weekday."""
+    """
+    Day 1 = Saturday; Day 2 = Sunday. Topic hint overrides weekday.
+
+    A topic naming BOTH days ("LEP Day 1 - 2") is not a hint. The same Zoom
+    link serves both days, so such a topic must fall through to the weekday —
+    reading the literal "day 1" out of it files Sunday's session as Day 1 and
+    splits the cohort across two session keys.
+    """
     topic_l = topic.lower()
-    if "day 2" in topic_l or "day2" in topic_l or "session 2" in topic_l:
-        return "Day 2"
-    if "day 1" in topic_l or "day1" in topic_l or "session 1" in topic_l:
-        return "Day 1"
+    if not _LEP_BOTH_DAYS.search(topic_l):
+        if "day 2" in topic_l or "day2" in topic_l or "session 2" in topic_l:
+            return "Day 2"
+        if "day 1" in topic_l or "day1" in topic_l or "session 1" in topic_l:
+            return "Day 1"
     if session_date:
         try:
             wd = datetime.strptime(session_date, "%Y-%m-%d").date().weekday()

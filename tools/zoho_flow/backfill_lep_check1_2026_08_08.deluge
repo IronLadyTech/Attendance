@@ -105,8 +105,8 @@ for each row in rows
 	status = parts.get(1).toString().trim();
 	keyL = key.toLowerCase();
 	isEmail = keyL.contains("@");
-	nameNorm = keyL.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-	nameNorm = nameNorm.replaceAll("  "," ").trim();
+	nameNorm = keyL.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+	nameNorm = nameNorm.replaceAll("  "," ",false).trim();
 	zoomFirst = nameNorm;
 	if(nameNorm.contains(" "))
 	{
@@ -145,8 +145,8 @@ for each row in rows
 			continue;
 		}
 		cNameNorm = cName.toString().toLowerCase().trim();
-		cNameNorm = cNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-		cNameNorm = cNameNorm.replaceAll("  "," ").trim();
+		cNameNorm = cNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+		cNameNorm = cNameNorm.replaceAll("  "," ",false).trim();
 		if(cNameNorm == nameNorm)
 		{
 			found = cand;
@@ -164,8 +164,8 @@ for each row in rows
 				continue;
 			}
 			cNameNorm = cName.toString().toLowerCase().trim();
-			cNameNorm = cNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-			cNameNorm = cNameNorm.replaceAll("  "," ").trim();
+			cNameNorm = cNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+			cNameNorm = cNameNorm.replaceAll("  "," ",false).trim();
 			if(cNameNorm.contains(nameNorm))
 			{
 				found = cand;

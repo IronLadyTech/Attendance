@@ -113,8 +113,8 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 			for each np in nameParts
 			{
 				nn = np.toString().toLowerCase().trim();
-				nn = nn.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-				nn = nn.replaceAll("  "," ").trim();
+				nn = nn.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+				nn = nn.replaceAll("  "," ",false).trim();
 				if(nn != "")
 				{
 					presentNameNorms.add(nn);
@@ -216,8 +216,8 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 				if(cName != null)
 				{
 					cNameNorm = cName.toString().toLowerCase().trim();
-					cNameNorm = cNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-					cNameNorm = cNameNorm.replaceAll("  "," ").trim();
+					cNameNorm = cNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+					cNameNorm = cNameNorm.replaceAll("  "," ",false).trim();
 					for each pnn in presentNameNorms
 					{
 						if(cNameNorm == pnn || cNameNorm.contains(pnn) || pnn.contains(cNameNorm))
@@ -388,8 +388,8 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 	{
 		zoomNameRaw = participant_name.trim();
 		zoomNameNorm = zoomNameRaw.toLowerCase();
-		zoomNameNorm = zoomNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-		zoomNameNorm = zoomNameNorm.replaceAll("  "," ").trim();
+		zoomNameNorm = zoomNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+		zoomNameNorm = zoomNameNorm.replaceAll("  "," ",false).trim();
 	}
 	info "LEP: match email=" + zoomEmail + " nameNorm=" + zoomNameNorm;
 
@@ -492,8 +492,8 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 				continue;
 			}
 			cNameNorm = cName.toString().toLowerCase().trim();
-			cNameNorm = cNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-			cNameNorm = cNameNorm.replaceAll("  "," ").trim();
+			cNameNorm = cNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+			cNameNorm = cNameNorm.replaceAll("  "," ",false).trim();
 			if(cNameNorm == zoomNameNorm)
 			{
 				foundRecord = cand;
@@ -521,8 +521,8 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 				continue;
 			}
 			cNameNorm = cName.toString().toLowerCase().trim();
-			cNameNorm = cNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-			cNameNorm = cNameNorm.replaceAll("  "," ").trim();
+			cNameNorm = cNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+			cNameNorm = cNameNorm.replaceAll("  "," ",false).trim();
 			if(cNameNorm.contains(zoomNameNorm))
 			{
 				foundRecord = cand;
@@ -553,8 +553,8 @@ void mark_lep_attendance_final(string participant_email, string participant_name
 					continue;
 				}
 				cNameNorm = cName.toString().toLowerCase().trim();
-				cNameNorm = cNameNorm.replaceAll("ms. ","").replaceAll("mr. ","").replaceAll("mrs. ","").replaceAll("dr. ","").replaceAll("prof. ","").replaceAll("miss ","").replaceAll("rev. ","");
-				cNameNorm = cNameNorm.replaceAll("  "," ").trim();
+				cNameNorm = cNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+				cNameNorm = cNameNorm.replaceAll("  "," ",false).trim();
 				cFirst = cNameNorm;
 				if(cNameNorm.contains(" "))
 				{

@@ -24,18 +24,28 @@ if _TOOLS not in sys.path:
     sys.path.insert(0, _TOOLS)
 
 
-def _load_dotenv() -> None:
-    """Pick up UPSTASH_* from a local .env so nothing has to be exported."""
+_ENV_CANDIDATES = (
+    os.path.join(_ROOT, ".env"),
+    os.path.join(_TOOLS, ".env"),
+    os.path.join(_TOOLS, "zoho_flow", ".env"),
+)
+
+
+def _load_dotenv(explicit: str = "") -> str:
+    """
+    Pick up UPSTASH_* from a local .env so nothing has to be exported.
+
+    Returns the path actually loaded, so the caller can say which one it used.
+    """
     try:
         from dotenv import load_dotenv
     except ImportError:
-        return
-    for candidate in (os.path.join(_ROOT, ".env"), os.path.join(_TOOLS, ".env")):
-        if os.path.isfile(candidate):
+        return ""
+    for candidate in ((explicit,) if explicit else _ENV_CANDIDATES):
+        if candidate and os.path.isfile(candidate):
             load_dotenv(candidate, override=False)
-
-
-_load_dotenv()
+            return candidate
+    return ""
 
 import lep_redis as lr  # noqa: E402
 from lep_checkpoint import _alt_identities  # noqa: E402  (match final's matching exactly)
@@ -75,7 +85,12 @@ def main() -> int:
     ap.add_argument("--day", choices=["1", "2"], help="1 or 2 (with --date)")
     ap.add_argument("--who", help="only rows whose name/email/identity contains this")
     ap.add_argument("--csv", metavar="PATH", help="also write the table to a CSV file")
+    ap.add_argument("--env", metavar="PATH", help="explicit .env holding UPSTASH_*")
     args = ap.parse_args()
+
+    loaded = _load_dotenv(args.env or "")
+    if loaded:
+        print(f"env       : {loaded}")
 
     if args.session:
         session_key = args.session.strip()

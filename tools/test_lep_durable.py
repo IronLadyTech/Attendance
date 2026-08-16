@@ -106,6 +106,36 @@ class TestPiyaliRestartSemantics(unittest.TestCase):
         self.assertNotEqual(calculate_final("Missing", "Missing", "Present"), "Absent")
 
 
+class TestSessionDayFromTopic(unittest.TestCase):
+    """A topic naming both days must not file Sunday's session as Day 1."""
+
+    def setUp(self):
+        import zoom_webhook_bridge as bridge
+        self.day = bridge._lep_session_day
+
+    def test_both_day_topic_falls_back_to_weekday(self):
+        # 2026-08-15 is a Saturday, 2026-08-16 a Sunday.
+        for topic in ("LEP Day 1 - 2", "LEP Day 1-2", "LEP Day 1 & 2",
+                      "IL LEP Days 1 and 2", "1 & 2 Day session"):
+            self.assertEqual(self.day(topic, "2026-08-16"), "Day 2", topic)
+            self.assertEqual(self.day(topic, "2026-08-15"), "Day 1", topic)
+
+    def test_single_day_topic_still_wins(self):
+        self.assertEqual(self.day("IL LEP Day 1", "2026-08-16"), "Day 1")
+        self.assertEqual(self.day("IL LEP Day 2", "2026-08-15"), "Day 2")
+
+    def test_no_hint_uses_weekday(self):
+        self.assertEqual(self.day("2 Day session IL LEP ", "2026-08-16"), "Day 2")
+        self.assertEqual(self.day("2 Day session IL LEP ", "2026-08-15"), "Day 1")
+
+    def test_the_regression_that_split_the_cohort(self):
+        # Both rooms ran on Sunday; they must land in the SAME session.
+        a = self.day("2 Day session IL LEP ", "2026-08-16")
+        b = self.day("LEP Day 1 - 2", "2026-08-16")
+        self.assertEqual(a, b, "same-day rooms must resolve to the same day")
+        self.assertEqual(b, "Day 2")
+
+
 class _FakePipe:
     """Records queued commands; exec() counts as one HTTP round-trip."""
 
