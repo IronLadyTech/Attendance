@@ -11,8 +11,8 @@ MC route (POST /):
   - meeting.ended (MC topic) → meeting.ended to Zoho (MC Completed only; no attendance)
 
 100BM route (POST /100bm) — same T+15 / T+30 / T+60 checkpoint model as MC:
-  - meeting.started (100BM topic) → schedule remaining checkpoint sweeps from start_time
-  - meeting.participant_joined / left → maintain roster; after redeploy, recover timers from start_time
+  - meeting.started (100BM topic) → schedule checkpoints from fixed 8:00 PM IST anchor
+  - meeting.participant_joined / left → maintain roster; after redeploy, recover timers from 8:00 PM IST
   - T+15 → mark_yes (in room) + lookup (joined-left) + attendance.first_check
   - T+30 → mark_yes (in room) + mark_no (joined-left dropout) + attendance.final_check
   - T+60 → mark_yes (in room) + attendance.hour_check (upgrade No/Absent → Yes only)
@@ -90,6 +90,9 @@ _MC_CHECKPOINT_3 = int(os.environ.get("MC_CHECKPOINT_3_SECONDS", "3600"))  # T+6
 _BM100_CHECKPOINT_1 = int(os.environ.get("BM100_CHECKPOINT_1_SECONDS", "900"))   # T+15
 _BM100_CHECKPOINT_2 = int(os.environ.get("BM100_CHECKPOINT_2_SECONDS", "1800"))  # T+30
 _BM100_CHECKPOINT_3 = int(os.environ.get("BM100_CHECKPOINT_3_SECONDS", "3600"))  # T+60
+# 100BM FT wall-clock start (IST). Checks = 8:15 / 8:30 / 9:00 PM regardless of Zoom click time.
+_BM100_ANCHOR_HOUR_IST = int(os.environ.get("BM100_ANCHOR_HOUR_IST", "20"))
+_BM100_ANCHOR_MINUTE_IST = int(os.environ.get("BM100_ANCHOR_MINUTE_IST", "0"))
 
 _DAY1_KEYWORDS = ["bhag", "breakthrough actions"]
 _DAY2_KEYWORDS = ["art of war", "shameless pitching"]
@@ -268,6 +271,29 @@ def _lep_checkpoint_anchor(session_date: str) -> datetime:
     day = datetime.strptime(session_date, "%Y-%m-%d").date()
     anchor = datetime(day.year, day.month, day.day, 9, 0, 0, tzinfo=_IST)
     return anchor.astimezone(timezone.utc)
+
+
+def _100bm_fixed_anchor_iso(session_date: str) -> str:
+    """
+    Hard-coded 100BM FT start: 8:00 PM IST on the session date.
+
+    Zoom hosts often start early/late; checkpoints must still fire at
+    8:15 / 8:30 / 9:00 PM IST (T+15 / T+30 / T+60 from this anchor).
+    """
+    try:
+        day = datetime.strptime(session_date, "%Y-%m-%d").date()
+    except ValueError:
+        day = datetime.now(_IST).date()
+    anchor = datetime(
+        day.year,
+        day.month,
+        day.day,
+        _BM100_ANCHOR_HOUR_IST,
+        _BM100_ANCHOR_MINUTE_IST,
+        0,
+        tzinfo=_IST,
+    )
+    return anchor.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _mc_session_day(topic: str) -> str:
@@ -872,6 +898,14 @@ def _100bm_cancel_timers(state: dict) -> None:
 
 
 def _100bm_schedule_checkpoints(meeting_id: str, state: dict) -> None:
+    session_date = state.get("session_date") or _session_date_ist(state.get("start_time", ""))
+    state["session_date"] = session_date
+    # Always re-apply fixed 8:00 PM IST anchor (ignore early/late Zoom start).
+    state["checkpoint_anchor"] = _100bm_fixed_anchor_iso(session_date)
+    state["planned_start_time"] = state["checkpoint_anchor"]
+    state["checkpoint_anchor_source"] = (
+        f"fixed_{_BM100_ANCHOR_HOUR_IST:02d}:{_BM100_ANCHOR_MINUTE_IST:02d}_IST"
+    )
     _schedule_checkpoint_timers(
         meeting_id,
         state,
@@ -1981,7 +2015,8 @@ def main() -> None:
     print(
         f"Bridge listening http://{args.host}:{args.port}/\n"
         f"MC checkpoints     : T+{_MC_CHECKPOINT_1}s (first), T+{_MC_CHECKPOINT_2}s (final), T+{_MC_CHECKPOINT_3}s (hour)\n"
-        f"100BM checkpoints: T+{_BM100_CHECKPOINT_1}s (first), T+{_BM100_CHECKPOINT_2}s (final), T+{_BM100_CHECKPOINT_3}s (hour)\n"
+        f"100BM checkpoints: T+{_BM100_CHECKPOINT_1}s / T+{_BM100_CHECKPOINT_2}s / T+{_BM100_CHECKPOINT_3}s "
+        f"from {_BM100_ANCHOR_HOUR_IST:02d}:{_BM100_ANCHOR_MINUTE_IST:02d} IST\n"
         f"LEP checkpoints  : Day1 {_LEP_DELAYS_DAY1} / Day2 {_LEP_DELAYS_DAY2} (9:00 AM IST anchor)\n"
         f"Day 1 keywords     : {_DAY1_KEYWORDS}\n"
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
