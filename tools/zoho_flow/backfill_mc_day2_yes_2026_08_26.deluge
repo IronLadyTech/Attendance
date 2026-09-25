@@ -1,0 +1,169 @@
+// ONE-TIME backfill — MC Day 2 attendance from Zoom export (30+ minutes total → Yes)
+// Batch: 2026-08-25 | Session (Day 2): 2026-08-26 | Meeting: 85212528515
+// Signature: void backfill_mc_day2_yes_2026_08_26()
+// No external connection — uses native zoho.crm.* (paste into Zoho CRM Functions, NOT Flow).
+//
+// Paste into Zoho CRM → Setup → Developer Space → Functions → Create → Execute ONCE → disable/delete after.
+// Source: participants_85212528515_2026_08_26.csv — aggregate duration ≥ 30 min, staff excluded.
+// Does NOT set No/Absent — only marks Yes for matched batch leads.
+
+void backfill_mc_day2_yes_2026_08_26()
+{
+batch_start_date = "2026-08-25";
+batch_ddMMyyyy = "25-08-2026";
+attendance_field = "Day_2_Attendance";
+
+// Fast lookup: comma-wrapped lowercase emails from Zoom (85 participants, ≥30 min)
+yesEmailCsv = ",aagarwal005@gmail.com,afreen786@gmail.com,aninditagoswami.ufaber@gmail.com,anjalipooja4@gmail.com,anu.panakanti@gmail.com,ashagr@canarabank.com,ashikamathews@gmail.com,ashwinipaunikar37@gmail.com,asmitadixit@gmail.com,aswathyupendran@gmsil.com,bedisanya1@gmail.com,bhagyashribabhulkar@gmail.com,bimpykum@gmail.com,caasha.k@gmail.com,connectbharshada@gmail.com,deekshaprajapati009@gmail.com,desaihiral17@gmail.com,devyanitomar13@gmail.com,divyabhallaa21@gmail.com,divyagurnani2712@gmail.com,dynamicanita2@yahoo.com,farhanaaz0416@gmail.com,gayathrinayak171@gmail.com,gayatrirajpurohit1924@gmail.com,gkrishnan686@gmail.com,harpreetmeetu@gmail.com,hitikak@yahoo.com,ieebithabegam@yahoo.in,indushree.c@gmail.com,jyothi.thimmaiah81@gmail.com,karishma.zade07@gmail.com,kausalyaramalingam1997@gmail.com,kiroaryan.p@gmail.com,mamtamadavi31892@gmail.com,mansidsharma05@gmail.com,meghasarate03@gmail.com,mghkhandelwal93@gmail.com,mh.astha@gmail.com,mitu@gmail.co.in,monica.mrt8@gmail.com,ms.cynthiya@gmail.com,munalesujata@gmail.com,nehalad@gmail.com,nehrapoonam50@gmail.com,nidhi.srivastv89@gmail.com,njain048@gmail.com,nroja246@gmail.com,pallavi.ghosh.26@gmail.com,pavanisantoshi64@gmail.com,raina1999@gmail.com,rajaneealaspurkar@gmail.com,ratnamerugu@gmail.com,reemahasija@gmail.com,rppremitha@gmail.com,sagarpadma16@gmail.com,saloni.kolage@gmail.com,saminashkh4@gmail.com,santa.kolay2019@gmail.com,setitlive@gmail.com,shagun.ipcw@gmail.com,shahinbioinfo@gmail.com,shaikafreen6@gmail.com,shanoliray@gmail.com,shruti.shrutigoel@gmail.com,sirlajhansi123@gmail.com,sneha.rockworld@gmail.com,sneha19sept@gmail.com,snehadase2@gmail.com,srivastav.mangla@gmail.com,srividya691991@gmail.com,ssb2695@gmail.com,suhasiniaini14@gmail.com,sumitaneha@gmail.com,sushma.a.tiwari@accenture.com,suvina_shetty@rediffmail.com,svlmanognya@gmail.com,tamalika11@gmail.com,usharani@natcopharma.co.in,uzmanay786@gmail.com,vaishalirajpurohit48@gmail.com,vaishalisarswat@gmail.com,vaishalitungare16@gmail.com,veda2019.shine@gmail.com,vidyavijayan10@gmail.com,waghmare.mrunali02@gmail.com,";
+
+info "backfill MC Day2: batch=" + batch_start_date + " rule=30+min Yes count=85";
+
+batch_ddMMyy = batch_start_date.subString(8,10) + "/" + batch_start_date.subString(5,7) + "/" + batch_start_date.subString(2,4);
+
+// Native CRM search — no Flow connection (same pattern as mark_mc_completed_crm.deluge)
+allLeads = List();
+seenIds = ",";
+pageNums = {1,2,3,4,5,6,7,8,9,10};
+for each pageNum in pageNums
+{
+	pageLeads = zoho.crm.searchRecords("Leads","(Payment_Status:equals:Completed)",pageNum,200);
+	pageStr = "";
+	if(pageLeads != null)
+	{
+		pageStr = pageLeads.toString();
+	}
+	if(pageLeads == null || pageLeads.size() == 0 || pageStr.contains("\"status\":\"error\"") || pageStr.contains("API_MAX_LIMIT") || pageStr.contains("CREDIT"))
+	{
+		if(pageStr.contains("\"status\":\"error\"") || pageStr.contains("API_MAX_LIMIT") || pageStr.contains("CREDIT"))
+		{
+			info "backfill searchRecords API error page=" + pageNum + " resp=" + pageStr;
+		}
+		break;
+	}
+	pageAdded = 0;
+	for each lead in pageLeads
+	{
+		leadStr = lead.toString();
+		if(leadStr == null || !leadStr.startsWith("{"))
+		{
+			continue;
+		}
+		leadId = lead.get("id").toString();
+		if(seenIds.contains("," + leadId + ","))
+		{
+			continue;
+		}
+		leadDate = lead.get("MC_Start_Date_Time");
+		dateMatch = false;
+		if(leadDate != null)
+		{
+			dateYMD = leadDate.toString("yyyy-MM-dd");
+			dateDMY = leadDate.toString("dd-MM-yyyy");
+			rawDate = leadDate.toString();
+			if(dateYMD == batch_start_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_start_date) || rawDate.contains(batch_ddMMyyyy) || rawDate.contains(batch_ddMMyy))
+			{
+				dateMatch = true;
+			}
+		}
+		if(dateMatch)
+		{
+			seenIds = seenIds + leadId + ",";
+			allLeads.add(lead);
+			pageAdded = pageAdded + 1;
+		}
+	}
+	info "backfill search page=" + pageNum + " raw=" + pageLeads.size() + " batchMatched=" + pageAdded;
+	if(pageLeads.size() < 200)
+	{
+		break;
+	}
+}
+info "backfill: batch leads in CRM=" + allLeads.size();
+
+updateList = List();
+skippedAlreadyYes = 0;
+skippedNotInZoom = 0;
+matchedYes = 0;
+matchedEmails = ",";
+
+for each lead in allLeads
+{
+	leadEmail = lead.get("Email");
+	emailL = "";
+	if(leadEmail != null)
+	{
+		emailL = leadEmail.toString().toLowerCase().trim();
+	}
+	if(emailL == "" || !yesEmailCsv.contains("," + emailL + ","))
+	{
+		skippedNotInZoom = skippedNotInZoom + 1;
+		continue;
+	}
+	matchedYes = matchedYes + 1;
+	matchedEmails = matchedEmails + emailL + ",";
+	existing = lead.get(attendance_field);
+	if(existing != null && existing.toString() == "Yes")
+	{
+		skippedAlreadyYes = skippedAlreadyYes + 1;
+		continue;
+	}
+	recMap = Map();
+	recMap.put("id",lead.get("id"));
+	recMap.put(attendance_field,"Yes");
+	updateList.add(recMap);
+}
+
+// Zoom emails with no CRM lead in this batch
+unmatchedZoom = 0;
+unmatchedList = List();
+yesParts = yesEmailCsv.toList(",");
+for each part in yesParts
+{
+	em = part.toString().trim();
+	if(em == "" || !em.contains("@"))
+	{
+		continue;
+	}
+	if(!matchedEmails.contains("," + em + ","))
+	{
+		unmatchedZoom = unmatchedZoom + 1;
+		unmatchedList.add(em);
+		info "backfill UNMATCHED Zoom email (no batch lead): " + em;
+	}
+}
+unmatchedBlock = "";
+for each em in unmatchedList
+{
+	if(unmatchedBlock != "")
+	{
+		unmatchedBlock = unmatchedBlock + "; ";
+	}
+	unmatchedBlock = unmatchedBlock + em;
+}
+info "backfill UNMATCHED BLOCK (" + unmatchedZoom + "): " + unmatchedBlock;
+
+updatedCount = 0;
+chunkNum = 0;
+chunk = List();
+for each recMap in updateList
+{
+	chunk.add(recMap);
+	if(chunk.size() == 100)
+	{
+		chunkNum = chunkNum + 1;
+		bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+		updatedCount = updatedCount + chunk.size();
+		info "backfill bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " resp=" + bulkResp.toString();
+		chunk = List();
+	}
+}
+if(chunk.size() > 0)
+{
+	chunkNum = chunkNum + 1;
+	bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+	updatedCount = updatedCount + chunk.size();
+	info "backfill bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " resp=" + bulkResp.toString();
+}
+
+info "backfill DONE batch=" + batch_start_date + " field=" + attendance_field + " batchLeads=" + allLeads.size() + " zoomYesMatched=" + matchedYes + " updated=" + updatedCount + " alreadyYes=" + skippedAlreadyYes + " notInZoomList=" + skippedNotInZoom + " unmatchedZoomEmails=" + unmatchedZoom + " chunks=" + chunkNum;
+}

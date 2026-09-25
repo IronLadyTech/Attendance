@@ -1,0 +1,240 @@
+// Zoho Flow / CRM — spread an LEP cohort evenly across the 4 Zoom rooms
+// Module: Session_Attendance
+// Signature: void assign_lep_zoom_rooms(string batch_date)
+//
+// batch_date = the SATURDAY date, yyyy-MM-dd (same cohort key attendance uses)
+//
+// Writes LEP_Zoom_Link on each cohort record. send_lep_session_reminder reads
+// that field, so every reminder (1 day / 1 hour / 15 min, Day 1 and Day 2)
+// then carries the participant's own room.
+//
+// Safe to re-run. A record that already has a link is never reassigned, so a
+// person keeps the same room across both days and all three reminders.
+// New registrations picked up on a later run go to whichever room is emptiest.
+//
+// PASTE YOUR 4 JOIN URLS BELOW before using.
+
+void assign_lep_zoom_rooms(string batch_date)
+{
+	moduleName = "Session_Attendance";
+
+	// ============================================================
+	// THE 4 ROOMS — paste the full join URL incl. ?pwd= for each
+	// Order matches zoom1..zoom4 on the bridge (/lep, /lep2, /lep3, /lep4)
+	// ============================================================
+	roomLinks = List();
+	roomLinks.add("https://us02web.zoom.us/j/83826109294?pwd=REPLACE_ME_1");
+	roomLinks.add("https://us02web.zoom.us/j/86352877237?pwd=REPLACE_ME_2");
+	roomLinks.add("https://us02web.zoom.us/j/95073725125?pwd=REPLACE_ME_3");
+	roomLinks.add("https://us02web.zoom.us/j/92009328376?pwd=REPLACE_ME_4");
+
+	if(batch_date == null || batch_date.trim() == "" || batch_date == "null")
+	{
+		info "LEP rooms: batch_date required (yyyy-MM-dd, the Saturday)";
+		return;
+	}
+	cohortYMD = batch_date.trim();
+	if(cohortYMD.length() < 10)
+	{
+		info "LEP rooms: invalid batch_date=" + cohortYMD;
+		return;
+	}
+	cohortDMY = cohortYMD.subString(8,10) + "-" + cohortYMD.subString(5,7) + "-" + cohortYMD.subString(0,4);
+
+	// ============================================================
+	// LOAD THE COHORT
+	// ============================================================
+	allRecords = List();
+	pageNums = {1,2,3,4,5};
+	for each pageNum in pageNums
+	{
+		pageResp = zoho.crm.getRecords(moduleName,pageNum,200);
+		pageCount = 0;
+		if(pageResp != null)
+		{
+			pageList = pageResp.toString().toJsonList();
+			for each pageRec in pageList
+			{
+				allRecords.add(pageRec);
+				pageCount = pageCount + 1;
+			}
+		}
+		if(pageCount < 200)
+		{
+			break;
+		}
+	}
+
+	cohort = List();
+	for each recJson in allRecords
+	{
+		reg = recJson.getJson("LEP_Start_Date");
+		if(reg == null)
+		{
+			continue;
+		}
+		rawDate = reg.toString();
+		dateOk = false;
+		if(rawDate.contains(cohortYMD) || rawDate.contains(cohortDMY))
+		{
+			dateOk = true;
+		}
+		else
+		{
+			try
+			{
+				if(reg.toString("yyyy-MM-dd") == cohortYMD || reg.toString("dd-MM-yyyy") == cohortDMY)
+				{
+					dateOk = true;
+				}
+			}
+			catch(dateErr)
+			{
+				dateOk = false;
+			}
+		}
+		if(dateOk)
+		{
+			cohort.add(recJson);
+		}
+	}
+	info "LEP rooms: cohort=" + cohortYMD + " records=" + cohort.size();
+
+	if(cohort.size() == 0)
+	{
+		info "LEP rooms: nothing to assign";
+		return;
+	}
+
+	// ============================================================
+	// COUNT WHAT IS ALREADY ASSIGNED, SO A RE-RUN STAYS BALANCED
+	// ============================================================
+	counts = List();
+	for each rl in roomLinks
+	{
+		counts.add(0);
+	}
+	unassigned = List();
+
+	for each recJson in cohort
+	{
+		existing = recJson.getJson("LEP_Zoom_Link");
+		hasLink = existing != null && existing.toString().trim() != "" && existing.toString() != "null";
+		if(hasLink)
+		{
+			cur = existing.toString().trim();
+			idx = 0;
+			matched = false;
+			for each rl in roomLinks
+			{
+				if(!matched && rl == cur)
+				{
+					counts.set(idx,counts.get(idx) + 1);
+					matched = true;
+				}
+				idx = idx + 1;
+			}
+			// A link we do not recognise is left alone — someone set it by hand.
+		}
+		else
+		{
+			unassigned.add(recJson);
+		}
+	}
+	info "LEP rooms: already assigned=" + (cohort.size() - unassigned.size()) + " to assign=" + unassigned.size();
+
+	// ============================================================
+	// FILL THE EMPTIEST ROOM EACH TIME
+	// ============================================================
+	updateList = List();
+	for each recJson in unassigned
+	{
+		recordId = recJson.getJson("id");
+		if(recordId == null)
+		{
+			continue;
+		}
+		lowIdx = 0;
+		lowVal = counts.get(0);
+		i = 0;
+		for each c in counts
+		{
+			if(c < lowVal)
+			{
+				lowVal = c;
+				lowIdx = i;
+			}
+			i = i + 1;
+		}
+		recMap = Map();
+		recMap.put("id",recordId.toString());
+		recMap.put("LEP_Zoom_Link",roomLinks.get(lowIdx));
+		updateList.add(recMap);
+		counts.set(lowIdx,counts.get(lowIdx) + 1);
+	}
+
+	// ============================================================
+	// BULK UPDATE
+	// ============================================================
+	updatedCount = 0;
+	chunk = List();
+	for each updateRec in updateList
+	{
+		chunk.add(updateRec);
+		if(chunk.size() == 100)
+		{
+			bulkResp = zoho.crm.bulkUpdate(moduleName,chunk);
+			info "LEP rooms bulk response=" + bulkResp;
+			if(bulkResp != null)
+			{
+				try
+				{
+					for each bulkRow in bulkResp.toString().toJsonList()
+					{
+						rowStatus = bulkRow.getJson("status");
+						if(rowStatus != null && rowStatus.toString() == "success")
+						{
+							updatedCount = updatedCount + 1;
+						}
+					}
+				}
+				catch(bulkErr)
+				{
+					info "LEP rooms bulk parse error=" + bulkErr;
+				}
+			}
+			chunk = List();
+		}
+	}
+	if(chunk.size() > 0)
+	{
+		bulkResp = zoho.crm.bulkUpdate(moduleName,chunk);
+		info "LEP rooms final bulk response=" + bulkResp;
+		if(bulkResp != null)
+		{
+			try
+			{
+				for each bulkRow in bulkResp.toString().toJsonList()
+				{
+					rowStatus = bulkRow.getJson("status");
+					if(rowStatus != null && rowStatus.toString() == "success")
+					{
+						updatedCount = updatedCount + 1;
+					}
+				}
+			}
+			catch(bulkErr2)
+			{
+				info "LEP rooms final bulk parse error=" + bulkErr2;
+			}
+		}
+	}
+
+	i = 0;
+	for each c in counts
+	{
+		info "LEP rooms: room " + (i + 1) + " = " + c + " participants";
+		i = i + 1;
+	}
+	info "LEP rooms: cohort=" + cohortYMD + " assigned=" + updatedCount;
+}

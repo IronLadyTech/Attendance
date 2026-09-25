@@ -55,31 +55,84 @@ if(session_att_date == null || session_att_date.trim() == "" || session_att_date
 		session_att_date = zoho.currenttime.toString("yyyy-MM-dd");
 	}
 }
-invite_date = session_att_date;
+invite_date = session_att_date.trim();
 invite_ddMMyyyy = invite_date.subString(8,10) + "-" + invite_date.subString(5,7) + "-" + invite_date.subString(0,4);
+invite_slash_yy = invite_date.subString(8,10) + "/" + invite_date.subString(5,7) + "/" + invite_date.subString(2,4);
+invite_slash_yyyy = invite_date.subString(8,10) + "/" + invite_date.subString(5,7) + "/" + invite_date.subString(0,4);
 info "100BM checkpoint: type=" + check_type + " session_att_date=" + session_att_date + " invite_cohort=" + invite_date;
-// Eligibility: FT_Invite_Date = session date (no Payment_Status filter). Search by date then
-// verify in-memory. 10 pages x 200 keeps the function under the 30s limit.
-searchCriteria = "(FT_Invite_Date:equals:" + invite_date + ")";
+// Eligibility: FT_Invite_Date = session date. Try yyyy-MM-dd then dd-MM-yyyy (Zoho date search varies).
+// If cohort is empty, only present-by-email Yes can write — everyone else stays blank (root cause of Yes-only).
 allLeads = List();
+searchUsed = "";
+criteriaList = List();
+criteriaList.add("(FT_Invite_Date:equals:" + invite_date + ")");
+criteriaList.add("(FT_Invite_Date:equals:" + invite_ddMMyyyy + ")");
 pageNums = {1,2,3,4,5,6,7,8,9,10};
-for each pageNum in pageNums
+for each searchCriteria in criteriaList
 {
-	pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
-	if(pageLeads != null && pageLeads.size() >= 1)
+	trialLeads = List();
+	trialOk = false;
+	for each pageNum in pageNums
 	{
-		allLeads.addAll(pageLeads);
-		if(pageLeads.size() < 200)
+		pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
+		pageStr = "";
+		if(pageLeads != null)
+		{
+			pageStr = pageLeads.toString();
+		}
+		isApiError = pageStr.contains("\"status\":\"error\"") || pageStr.contains("API_MAX_LIMIT") || pageStr.contains("CREDIT");
+		// Accept a real List (starts with [) OR any non-error response with size()>0.
+		badShape = pageLeads == null || pageStr == "" || isApiError;
+		if(!badShape && pageStr.startsWith("{") && pageLeads.size() < 1)
+		{
+			badShape = true;
+		}
+		if(badShape)
+		{
+			if(pageNum == 1)
+			{
+				info "100BM checkpoint: searchRecords fail criteria=" + searchCriteria + " resp=" + pageStr;
+			}
+			break;
+		}
+		trialOk = true;
+		if(pageLeads.size() >= 1)
+		{
+			trialLeads.addAll(pageLeads);
+			if(pageLeads.size() < 200)
+			{
+				break;
+			}
+		}
+		else
 		{
 			break;
 		}
 	}
-	else
+	info "100BM checkpoint: criteria=" + searchCriteria + " fetched=" + trialLeads.size();
+	if(trialLeads.size() > 0)
 	{
+		allLeads = trialLeads;
+		searchUsed = searchCriteria;
 		break;
 	}
+	if(trialOk && trialLeads.size() == 0 && searchUsed == "")
+	{
+		searchUsed = searchCriteria + " (0 hits)";
+	}
 }
-info "100BM leads fetched: " + allLeads.size();
+info "100BM leads fetched: " + allLeads.size() + " searchUsed=" + searchUsed;
+if(allLeads.size() == 0 && (check_type == "first" || check_type == "final"))
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com"
+		subject :"100BM ALERT — 0 invitees for checkpoint (" + invite_date + " / " + check_type + ")"
+		message :"<p>Batch No/Absent could NOT run — CRM invite cohort empty.</p><p>check_type=" + check_type + "<br>session_date=" + session_att_date + "<br>invite_cohort=" + invite_date + "<br>searchTried=" + invite_date + " and " + invite_ddMMyyyy + "</p><p>Only Zoom present→Yes (by email) can write. Everyone else stays blank.</p><p>Fix: ensure FT_Invite_Date = " + invite_date + " on invited leads BEFORE the FT, then re-run backfill if needed.</p>"
+	]
+	info "100BM checkpoint: ALERT emailed — 0 invitees; Yes-only path remains";
+}
 updateList = List();
 skippedCount = 0;
 matchedCount = 0;
@@ -92,7 +145,7 @@ for each lead in allLeads
 		dateDMY = leadInvite.toString("dd-MM-yyyy");
 		rawDate = leadInvite.toString();
 		dateMatch = false;
-		if(dateYMD == invite_date || dateDMY == invite_ddMMyyyy || rawDate.contains(invite_date) || rawDate.contains(invite_ddMMyyyy))
+		if(dateYMD == invite_date || dateDMY == invite_ddMMyyyy || rawDate.contains(invite_date) || rawDate.contains(invite_ddMMyyyy) || rawDate.contains(invite_slash_yy) || rawDate.contains(invite_slash_yyyy))
 		{
 			dateMatch = true;
 		}

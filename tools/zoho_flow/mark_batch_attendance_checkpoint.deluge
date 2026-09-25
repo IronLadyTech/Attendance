@@ -90,12 +90,23 @@ for each off in offsets
 		parameters:coqlBody.toString()
 		connection:"zoho_flow_to_zoho_crm"
 	];
+	// Guard: credit/limit failures may return a List/string — Map.get("data") on a List → BIGINT error.
+	respStr = "";
+	if(coqlResp != null)
+	{
+		respStr = coqlResp.toString();
+	}
+	if(respStr == "" || !respStr.startsWith("{") || respStr.contains("\"status\":\"error\"") || !respStr.contains("\"data\""))
+	{
+		info "COQL failed/unexpected (offset " + off + ")=" + respStr;
+		break;
+	}
 	pageLeads = coqlResp.get("data");
 	if(pageLeads == null || pageLeads.size() == 0)
 	{
 		if(off == 0)
 		{
-			info "COQL resp (offset 0)=" + coqlResp.toString();
+			info "COQL resp (offset 0)=" + respStr;
 		}
 		break;
 	}

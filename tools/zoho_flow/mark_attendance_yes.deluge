@@ -63,10 +63,25 @@ lead_list = List();
 if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
 {
 	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")and(Payment_Status:equals:Completed)",1,5);
-	if(ls != null && ls.size() > 0)
+	// API credit/limit errors return a Map — do not for-each as leads (avoids BIGINT .get error).
+	lsStr = "";
+	if(ls != null)
+	{
+		lsStr = ls.toString();
+	}
+	if(ls != null && ls.size() > 0 && !lsStr.contains("\"status\":\"error\"") && !lsStr.contains("API_MAX_LIMIT") && !lsStr.contains("CREDIT"))
 	{
 		for each cand in ls
 		{
+			if(cand == null)
+			{
+				continue;
+			}
+			candStr = cand.toString();
+			if(candStr == null || !candStr.startsWith("{"))
+			{
+				continue;
+			}
 			leadDate = cand.get("MC_Start_Date_Time");
 			if(leadDate != null)
 			{
@@ -80,6 +95,10 @@ if(participant_email != null && participant_email.trim() != "" && participant_em
 				}
 			}
 		}
+	}
+	else if(lsStr.contains("\"status\":\"error\"") || lsStr.contains("API_MAX_LIMIT") || lsStr.contains("CREDIT"))
+	{
+		info "MARK YES: searchRecords API error: " + lsStr;
 	}
 }
 // --- Name fallback (same logic as before) ---

@@ -477,6 +477,15 @@ def _mc_sweep(meeting_id: str, sweep: int) -> None:
         f"ever_joined={len(ever_joined)} topic={state['topic']!r} batch={state['batch_date']}\n"
     )
 
+    # Batch checkpoint FIRST so first/final/hour is not buried behind dozens of mark_yes.
+    event = _checkpoint_event(sweep)
+    payload = _mc_base_payload(state)
+    payload["event"] = event
+    payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
+    payload["present_emails"] = _roster_email_csv(roster)
+    _post_to_zoho(forward_url, payload, f"mc-sweep{sweep}")
+    sys.stderr.write(f"[sweep{sweep}] posted batch event={event}\n")
+
     # Present at checkpoint → mark Yes (CRM) or unmatched sheet if no lead
     for info in roster.values():
         email = info.get("email", "")
@@ -510,13 +519,6 @@ def _mc_sweep(meeting_id: str, sweep: int) -> None:
             _mc_mark_no(forward_url, state, email, name, info.get("join_time", ""))
 
     # T+60: no lookup, no mark_no — only mark_yes (above) + hour_check batch upgrade
-
-    event = _checkpoint_event(sweep)
-    payload = _mc_base_payload(state)
-    payload["event"] = event
-    payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
-    payload["present_emails"] = _roster_email_csv(roster)
-    _post_to_zoho(forward_url, payload, f"mc-sweep{sweep}")
 
 
 def _apply_checkpoint_anchor(state: dict) -> None:
@@ -854,6 +856,19 @@ def _100bm_sweep(meeting_id: str, sweep: int) -> None:
         f"ever_joined={len(ever_joined)} topic={state['topic']!r} session={state['session_date']}\n"
     )
 
+    # Post batch checkpoint FIRST (first/final/hour). Individual Yes/No after — otherwise
+    # dozens of mark_yes webhooks can bury or delay the one final_check in Zoho Flow.
+    event = _checkpoint_event(sweep)
+    payload = _100bm_base_payload(state)
+    payload["event"] = event
+    payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
+    payload["present_emails"] = _roster_email_csv(roster)
+    _post_to_zoho(forward_url, payload, f"100bm-sweep{sweep}")
+    sys.stderr.write(
+        f"[100bm/sweep{sweep}] posted batch event={event} "
+        f"present={len(roster)} ever_joined={len(ever_joined)}\n"
+    )
+
     for info in roster.values():
         email = info.get("email", "")
         name = info.get("name", "")
@@ -883,13 +898,6 @@ def _100bm_sweep(meeting_id: str, sweep: int) -> None:
             if not email and not name:
                 continue
             _100bm_mark_no(forward_url, state, email, name, info.get("join_time", ""))
-
-    event = _checkpoint_event(sweep)
-    payload = _100bm_base_payload(state)
-    payload["event"] = event
-    payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
-    payload["present_emails"] = _roster_email_csv(roster)
-    _post_to_zoho(forward_url, payload, f"100bm-sweep{sweep}")
 
 
 def _100bm_cancel_timers(state: dict) -> None:

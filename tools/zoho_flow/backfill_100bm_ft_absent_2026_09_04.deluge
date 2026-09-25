@@ -1,0 +1,172 @@
+// ONE-TIME backfill — 100BM FT Sep 4 2026: blank FT_attendance → Absent
+// Signature (Zoho CRM standalone): string standalone.backfill_100bm_ft_absent_2026_09_04()
+// No external connection — native zoho.crm.*
+//
+// Use when FT_Invite_Date = 2026-09-04 is set but FT_attendance is still blank
+// (batch first/final checkpoint did not write No/Absent).
+// Does NOT change existing Yes / No / Absent. Does NOT change FT_Invite_Date.
+// Sets FT_attended_date = 2026-09-04 when marking Absent.
+
+string standalone.backfill_100bm_ft_absent_2026_09_04()
+{
+invite_date = "2026-09-04";
+invite_ddMMyyyy = "04-09-2026";
+session_att_date = "2026-09-04";
+
+info "100BM backfill Absent: invite_cohort=" + invite_date;
+
+searchCriteria = "(FT_Invite_Date:equals:" + invite_date + ")";
+allLeads = List();
+pageNums = {1,2,3,4,5,6,7,8,9,10};
+for each pageNum in pageNums
+{
+	pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
+	pageStr = "";
+	if(pageLeads != null)
+	{
+		pageStr = pageLeads.toString();
+	}
+	if(pageLeads == null || pageStr == "" || pageStr.contains("\"status\":\"error\"") || pageStr.contains("API_MAX_LIMIT") || pageStr.contains("CREDIT") || !pageStr.startsWith("["))
+	{
+		if(pageNum == 1)
+		{
+			info "100BM backfill: searchRecords error page=" + pageNum + " resp=" + pageStr;
+		}
+		break;
+	}
+	if(pageLeads.size() >= 1)
+	{
+		allLeads.addAll(pageLeads);
+		if(pageLeads.size() < 200)
+		{
+			break;
+		}
+	}
+	else
+	{
+		break;
+	}
+}
+info "100BM backfill: fetched=" + allLeads.size();
+
+updateList = List();
+matchedCount = 0;
+skippedYes = 0;
+skippedNo = 0;
+skippedAbsent = 0;
+skippedOther = 0;
+
+for each lead in allLeads
+{
+	leadInvite = lead.get("FT_Invite_Date");
+	if(leadInvite == null)
+	{
+		continue;
+	}
+	dateYMD = leadInvite.toString("yyyy-MM-dd");
+	dateDMY = leadInvite.toString("dd-MM-yyyy");
+	rawDate = leadInvite.toString();
+	dateMatch = false;
+	if(dateYMD == invite_date || dateDMY == invite_ddMMyyyy || rawDate.contains(invite_date) || rawDate.contains(invite_ddMMyyyy) || rawDate.contains("04/09/26") || rawDate.contains("04/09/2026"))
+	{
+		dateMatch = true;
+	}
+	if(!dateMatch)
+	{
+		continue;
+	}
+	matchedCount = matchedCount + 1;
+	ftAtt = lead.get("FT_attendance");
+	ftBlank = ftAtt == null || ftAtt == "-None-" || ftAtt.toString().trim() == "" || ftAtt.toString().trim() == "null";
+	if(!ftBlank)
+	{
+		cur = ftAtt.toString().trim();
+		if(cur == "Yes")
+		{
+			skippedYes = skippedYes + 1;
+		}
+		else if(cur == "No")
+		{
+			skippedNo = skippedNo + 1;
+		}
+		else if(cur == "Absent")
+		{
+			skippedAbsent = skippedAbsent + 1;
+		}
+		else
+		{
+			skippedOther = skippedOther + 1;
+		}
+		continue;
+	}
+	recMap = Map();
+	recMap.put("id",lead.get("id"));
+	recMap.put("FT_attendance","Absent");
+	recMap.put("FT_attended_date",session_att_date);
+	updateList.add(recMap);
+}
+
+info "100BM backfill: matched=" + matchedCount + " toMarkAbsent=" + updateList.size() + " alreadyYes=" + skippedYes + " alreadyNo=" + skippedNo + " alreadyAbsent=" + skippedAbsent + " other=" + skippedOther;
+
+updatedCount = 0;
+failedCount = 0;
+chunkNum = 0;
+chunk = List();
+for each recMap in updateList
+{
+	chunk.add(recMap);
+	if(chunk.size() == 100)
+	{
+		chunkNum = chunkNum + 1;
+		bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+		chunkOk = 0;
+		chunkFail = 0;
+		if(bulkResp != null)
+		{
+			for each row in bulkResp
+			{
+				if(row.get("status") == "success")
+				{
+					chunkOk = chunkOk + 1;
+				}
+				else
+				{
+					chunkFail = chunkFail + 1;
+				}
+			}
+		}
+		updatedCount = updatedCount + chunkOk;
+		failedCount = failedCount + chunkFail;
+		info "100BM backfill bulk chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail;
+		chunk = List();
+	}
+}
+if(chunk.size() > 0)
+{
+	chunkNum = chunkNum + 1;
+	bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+	chunkOk = 0;
+	chunkFail = 0;
+	if(bulkResp != null)
+	{
+		for each row in bulkResp
+		{
+			if(row.get("status") == "success")
+			{
+				chunkOk = chunkOk + 1;
+			}
+			else
+			{
+				chunkFail = chunkFail + 1;
+			}
+		}
+	}
+	updatedCount = updatedCount + chunkOk;
+	failedCount = failedCount + chunkFail;
+	info "100BM backfill bulk chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail;
+}
+
+summary = "DONE invite=" + invite_date + " matched=" + matchedCount + " updatedAbsent=" + updatedCount + " failed=" + failedCount + " keptYes=" + skippedYes + " chunks=" + chunkNum;
+info "100BM backfill " + summary;
+return summary;
+}

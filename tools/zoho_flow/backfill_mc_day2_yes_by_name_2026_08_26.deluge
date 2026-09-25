@@ -1,0 +1,290 @@
+// ONE-TIME backfill — MC Day 2 Yes by NAME for Zoom emails that didn't match CRM Email
+// Batch: 2026-08-25 | field: Day_2_Attendance
+// Signature: void backfill_mc_day2_yes_by_name_2026_08_26()
+// No external connection — native zoho.crm.* (Zoho CRM Functions, NOT Flow).
+//
+// Run AFTER backfill_mc_day2_yes_2026_08_26 (email pass). Execute ONCE → disable/delete after.
+
+void backfill_mc_day2_yes_by_name_2026_08_26()
+{
+batch_start_date = "2026-08-25";
+batch_ddMMyyyy = "25-08-2026";
+batch_ddMMyy = batch_start_date.subString(8,10) + "/" + batch_start_date.subString(5,7) + "/" + batch_start_date.subString(2,4);
+attendance_field = "Day_2_Attendance";
+
+// zoomEmail|zoomName — 36 unmatched from list_mc_day2_unmatched_zoom_2026_08_26
+rows = List();
+rows.add("aagarwal005@gmail.com|avanti agarwal");
+rows.add("afreen786@gmail.com|Afreen SK");
+rows.add("aninditagoswami.ufaber@gmail.com|Anindita G");
+rows.add("anjalipooja4@gmail.com|Pooja Chauhan");
+rows.add("ashagr@canarabank.com|Asha G");
+rows.add("aswathyupendran@gmsil.com|Aswathy T U");
+rows.add("bedisanya1@gmail.com|Sanya B");
+rows.add("bimpykum@gmail.com|bimpy k");
+rows.add("caasha.k@gmail.com|Asha Jyothi");
+rows.add("deekshaprajapati009@gmail.com|Deeksha Prajapati");
+rows.add("divyabhallaa21@gmail.com|Divya Bhalla");
+rows.add("divyagurnani2712@gmail.com|Divya Gurnani");
+rows.add("farhanaaz0416@gmail.com|farha .");
+rows.add("gayatrirajpurohit1924@gmail.com|Gayatri Rajpurohit");
+rows.add("ieebithabegam@yahoo.in|Jeebitha begam");
+rows.add("indushree.c@gmail.com|indushree C");
+rows.add("karishma.zade07@gmail.com|karishma zade");
+rows.add("mansidsharma05@gmail.com|Mansi Sharma");
+rows.add("meghasarate03@gmail.com|megha suryawanshi");
+rows.add("mghkhandelwal93@gmail.com|Megha Khandelwal");
+rows.add("mitu@gmail.co.in|Mitu N");
+rows.add("monica.mrt8@gmail.com|monica sharma");
+rows.add("nehalad@gmail.com|Neha Lad");
+rows.add("ratnamerugu@gmail.com|CHANDRIKA JUTTIGA");
+rows.add("sagarpadma16@gmail.com|Padma Sagar");
+rows.add("saminashkh4@gmail.com|Sam Sam");
+rows.add("santa.kolay2019@gmail.com|SANTA KOLAY");
+rows.add("shagun.ipcw@gmail.com|Shagun Yadav");
+rows.add("shahinbioinfo@gmail.com|Shahin Banu");
+rows.add("shaikafreen6@gmail.com|Shaik Afreen");
+rows.add("ssb2695@gmail.com|Sonali B");
+rows.add("sumitaneha@gmail.com|Sumita Mandal");
+rows.add("sushma.a.tiwari@accenture.com|Sushma Tiwari");
+rows.add("suvina_shetty@rediffmail.com|Suvina Shetty");
+rows.add("usharani@natcopharma.co.in|Usharani Datla");
+rows.add("vaishalirajpurohit48@gmail.com|Vaishali rjprht");
+
+info "backfill MC Day2 BY NAME: batch=" + batch_start_date + " rows=" + rows.size();
+
+// Fetch batch cohort
+cohortRecs = List();
+seenIds = ",";
+pageNums = {1,2,3,4,5,6,7,8,9,10};
+for each pageNum in pageNums
+{
+	pageLeads = zoho.crm.searchRecords("Leads","(Payment_Status:equals:Completed)",pageNum,200);
+	pageStr = "";
+	if(pageLeads != null)
+	{
+		pageStr = pageLeads.toString();
+	}
+	if(pageLeads == null || pageLeads.size() == 0 || pageStr.contains("\"status\":\"error\"") || pageStr.contains("API_MAX_LIMIT") || pageStr.contains("CREDIT"))
+	{
+		if(pageStr.contains("\"status\":\"error\"") || pageStr.contains("API_MAX_LIMIT") || pageStr.contains("CREDIT"))
+		{
+			info "backfill name: searchRecords API error page=" + pageNum + " resp=" + pageStr;
+		}
+		break;
+	}
+	for each lead in pageLeads
+	{
+		leadStr = lead.toString();
+		if(leadStr == null || !leadStr.startsWith("{"))
+		{
+			continue;
+		}
+		leadId = lead.get("id").toString();
+		if(seenIds.contains("," + leadId + ","))
+		{
+			continue;
+		}
+		leadDate = lead.get("MC_Start_Date_Time");
+		dateMatch = false;
+		if(leadDate != null)
+		{
+			dateYMD = leadDate.toString("yyyy-MM-dd");
+			dateDMY = leadDate.toString("dd-MM-yyyy");
+			rawDate = leadDate.toString();
+			if(dateYMD == batch_start_date || dateDMY == batch_ddMMyyyy || rawDate.contains(batch_start_date) || rawDate.contains(batch_ddMMyyyy) || rawDate.contains(batch_ddMMyy))
+			{
+				dateMatch = true;
+			}
+		}
+		if(dateMatch)
+		{
+			seenIds = seenIds + leadId + ",";
+			cohortRecs.add(lead);
+		}
+	}
+	if(pageLeads.size() < 200)
+	{
+		break;
+	}
+}
+info "backfill name: batch cohort size=" + cohortRecs.size();
+
+updateList = List();
+updatedIds = ",";
+skippedAlreadyYes = 0;
+unmatched = 0;
+matched = 0;
+
+for each row in rows
+{
+	parts = row.toList("|");
+	if(parts.size() < 2)
+	{
+		continue;
+	}
+	zoomEmail = parts.get(0).toString().trim();
+	zoomName = parts.get(1).toString().trim();
+	nameNorm = zoomName.toLowerCase();
+	nameNorm = nameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+	nameNorm = nameNorm.replaceAll("  "," ",false).trim();
+	zoomFirst = nameNorm;
+	if(nameNorm.contains(" "))
+	{
+		zoomFirst = nameNorm.substring(0,nameNorm.indexOf(" "));
+	}
+	zoomLast = nameNorm;
+	if(nameNorm.contains(" "))
+	{
+		zoomLast = nameNorm.substring(nameNorm.lastIndexOf(" ") + 1).trim();
+	}
+
+	found = null;
+	how = "";
+	for each cand in cohortRecs
+	{
+		cName = cand.get("Full_Name");
+		if(cName == null)
+		{
+			cFirst = cand.get("First_Name");
+			cLast = cand.get("Last_Name");
+			cName = "";
+			if(cFirst != null)
+			{
+				cName = cFirst.toString().trim();
+			}
+			if(cLast != null)
+			{
+				if(cName != "")
+				{
+					cName = cName + " ";
+				}
+				cName = cName + cLast.toString().trim();
+			}
+			if(cName == "")
+			{
+				continue;
+			}
+		}
+		cNameNorm = cName.toString().toLowerCase().trim();
+		cNameNorm = cNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+		cNameNorm = cNameNorm.replaceAll("  "," ",false).trim();
+		if(cNameNorm == nameNorm)
+		{
+			found = cand;
+			how = "name-exact";
+			break;
+		}
+	}
+	if(found == null && nameNorm.length() >= 3)
+	{
+		for each cand in cohortRecs
+		{
+			cName = cand.get("Full_Name");
+			if(cName == null)
+			{
+				continue;
+			}
+			cNameNorm = cName.toString().toLowerCase().trim();
+			cNameNorm = cNameNorm.replaceAll("ms. ","",false).replaceAll("mr. ","",false).replaceAll("mrs. ","",false).replaceAll("dr. ","",false).replaceAll("prof. ","",false).replaceAll("miss ","",false).replaceAll("rev. ","",false);
+			cNameNorm = cNameNorm.replaceAll("  "," ",false).trim();
+			if(cNameNorm.contains(nameNorm) || nameNorm.contains(cNameNorm))
+			{
+				found = cand;
+				how = "name-contains";
+				break;
+			}
+			if(zoomFirst.length() >= 3 && zoomLast.length() >= 2 && cNameNorm.contains(" "))
+			{
+				cFirst = cNameNorm.substring(0,cNameNorm.indexOf(" "));
+				cLast = cNameNorm.substring(cNameNorm.lastIndexOf(" ") + 1).trim();
+				if(cFirst == zoomFirst && cLast == zoomLast)
+				{
+					found = cand;
+					how = "first-last";
+					break;
+				}
+				if(cFirst == zoomFirst && cLast.startsWith(zoomLast.substring(0,1)))
+				{
+					found = cand;
+					how = "first-last-prefix";
+					break;
+				}
+			}
+			if(zoomFirst.length() >= 4)
+			{
+				if(cNameNorm == zoomFirst)
+				{
+					found = cand;
+					how = "name-first";
+					break;
+				}
+				if(cNameNorm.length() > zoomFirst.length())
+				{
+					prefix = cNameNorm.substring(0,zoomFirst.length());
+					nextCh = cNameNorm.substring(zoomFirst.length(),zoomFirst.length() + 1);
+					if(prefix == zoomFirst && nextCh == " ")
+					{
+						found = cand;
+						how = "name-first";
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	if(found == null)
+	{
+		unmatched = unmatched + 1;
+		info "backfill name UNMATCHED: " + zoomEmail + " | " + zoomName;
+		continue;
+	}
+
+	leadId = found.get("id").toString();
+	if(updatedIds.contains("," + leadId + ","))
+	{
+		info "backfill name SKIP duplicate lead: " + zoomEmail + " id=" + leadId;
+		continue;
+	}
+	matched = matched + 1;
+	existing = found.get(attendance_field);
+	if(existing != null && existing.toString() == "Yes")
+	{
+		skippedAlreadyYes = skippedAlreadyYes + 1;
+		info "backfill name SKIP already Yes: " + zoomEmail + " crm=" + found.get("Full_Name") + " how=" + how;
+		continue;
+	}
+	recMap = Map();
+	recMap.put("id",found.get("id"));
+	recMap.put(attendance_field,"Yes");
+	updateList.add(recMap);
+	updatedIds = updatedIds + leadId + ",";
+	info "backfill name MATCH: " + zoomEmail + " | " + zoomName + " -> crm=" + found.get("Full_Name") + " how=" + how + " id=" + leadId;
+}
+
+updatedCount = 0;
+chunkNum = 0;
+chunk = List();
+for each recMap in updateList
+{
+	chunk.add(recMap);
+	if(chunk.size() == 100)
+	{
+		chunkNum = chunkNum + 1;
+		bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+		updatedCount = updatedCount + chunk.size();
+		info "backfill name bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " resp=" + bulkResp.toString();
+		chunk = List();
+	}
+}
+if(chunk.size() > 0)
+{
+	chunkNum = chunkNum + 1;
+	bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+	updatedCount = updatedCount + chunk.size();
+	info "backfill name bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " resp=" + bulkResp.toString();
+}
+
+info "backfill name DONE batch=" + batch_start_date + " cohort=" + cohortRecs.size() + " matched=" + matched + " updated=" + updatedCount + " alreadyYes=" + skippedAlreadyYes + " unmatched=" + unmatched + " chunks=" + chunkNum;
+}
