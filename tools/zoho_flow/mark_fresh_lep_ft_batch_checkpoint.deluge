@@ -1,0 +1,377 @@
+// Zoho Flow custom function — Fresh LEP FT batch checkpoint sweep (mirrors mark_100bm_batch_attendance_checkpoint)
+// Signature: void mark_fresh_lep_ft_batch_checkpoint(string start_time, string meeting_topic, string session_date, string check_type, string ever_joined_emails, string present_emails)
+//   check_type = "first"  → T+15: blank → No
+//   check_type = "final"  → T+30: present → Yes; joined-left → No; never joined → Absent
+//   check_type = "hour"   → T+60: in room + No/Absent → Yes; others unchanged
+//
+// Eligibility: Fresh_LEP_FT_Confirmation = Yes (NOT invite-date based).
+// Writes: Fresh_LEP_FT_Attendance. Confirmation is NEVER changed.
+// Present-by-email Yes also requires Confirmation = Yes.
+//
+// Called by: Zoho Flow "Fresh_LEP_FT_Attendance" branches
+//   attendance.first_check / final_check / hour_check
+//   (mirrors mark_100bm_batch_attendance_checkpoint.deluge — no in-repo Python caller)
+// GateGuard facts: no existing mark_fresh_lep_ft_* batch file (Glob 0); CRM Leads fields
+// Fresh_LEP_FT_Confirmation / Fresh_LEP_FT_Attendance; session_date yyyy-MM-dd.
+// User: "follow the same ft checkpoints but one thing you need to check the field that has
+// fresh ft confirmation is yes in the zoho , then mark their attendence accordingly.i need
+// the required functions with the logic."
+//
+// Flow mapping (attendance.first_check):
+//   start_time / meeting_topic / session_date from payload; check_type = first
+// Flow mapping (attendance.final_check):
+//   check_type = final; ever_joined_emails / present_emails from payload
+
+void mark_fresh_lep_ft_batch_checkpoint(string start_time, string meeting_topic, string session_date, string check_type, string ever_joined_emails, string present_emails)
+{
+if(meeting_topic != null && meeting_topic.trim() != "" && meeting_topic != "null")
+{
+	topicL = meeting_topic.toLowerCase();
+	// Topic: "Fast Track Session - Iron Lady" (Thursday 8:00 PM IST)
+	if(!topicL.contains("fast track session"))
+	{
+		info "FLEP-FT checkpoint: unknown topic=" + meeting_topic;
+		return;
+	}
+}
+if(check_type == null || check_type.trim() == "")
+{
+	info "FLEP-FT checkpoint: check_type missing";
+	return;
+}
+check_type = check_type.trim().toLowerCase();
+if(check_type != "first" && check_type != "final" && check_type != "hour")
+{
+	info "FLEP-FT checkpoint: invalid check_type=" + check_type;
+	return;
+}
+session_att_date = session_date;
+if(session_att_date == null || session_att_date.trim() == "" || session_att_date == "null")
+{
+	if(start_time != null && start_time.trim() != "" && start_time != "null")
+	{
+		session_att_date = start_time.substring(0,10);
+	}
+	else
+	{
+		session_att_date = zoho.currenttime.toString("yyyy-MM-dd");
+	}
+}
+info "FLEP-FT checkpoint: type=" + check_type + " session=" + session_att_date;
+// Eligibility: Fresh_LEP_FT_Confirmation = Yes
+allLeads = List();
+searchUsed = "";
+searchCriteria = "(Fresh_LEP_FT_Confirmation:equals:Yes)";
+pageNums = {1,2,3,4,5,6,7,8,9,10};
+for each pageNum in pageNums
+{
+	pageLeads = zoho.crm.searchRecords("Leads",searchCriteria,pageNum,200);
+	pageStr = "";
+	if(pageLeads != null)
+	{
+		pageStr = pageLeads.toString();
+	}
+	isApiError = pageStr.contains("\"status\":\"error\"") || pageStr.contains("API_MAX_LIMIT") || pageStr.contains("CREDIT");
+	badShape = pageLeads == null || pageStr == "" || isApiError;
+	if(!badShape && pageStr.startsWith("{") && pageLeads.size() < 1)
+	{
+		badShape = true;
+	}
+	if(badShape)
+	{
+		if(pageNum == 1)
+		{
+			info "FLEP-FT checkpoint: searchRecords fail criteria=" + searchCriteria + " resp=" + pageStr;
+		}
+		break;
+	}
+	searchUsed = searchCriteria;
+	if(pageLeads.size() >= 1)
+	{
+		allLeads.addAll(pageLeads);
+		if(pageLeads.size() < 200)
+		{
+			break;
+		}
+	}
+	else
+	{
+		break;
+	}
+}
+info "FLEP-FT leads fetched: " + allLeads.size() + " searchUsed=" + searchUsed;
+if(allLeads.size() == 0 && (check_type == "first" || check_type == "final"))
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com"
+		subject :"Fresh LEP FT ALERT — 0 confirmed leads for checkpoint (" + session_att_date + " / " + check_type + ")"
+		message :"<p>Batch No/Absent could NOT run — no leads with Fresh_LEP_FT_Confirmation = Yes.</p><p>check_type=" + check_type + "<br>session_date=" + session_att_date + "</p><p>Fix: set Confirmation = Yes on Thursday cohort BEFORE the session.</p>"
+	]
+	info "FLEP-FT checkpoint: ALERT emailed — 0 confirmed leads";
+}
+updateList = List();
+skippedCount = 0;
+matchedCount = 0;
+for each lead in allLeads
+{
+	conf = "";
+	if(lead.get("Fresh_LEP_FT_Confirmation") != null)
+	{
+		conf = lead.get("Fresh_LEP_FT_Confirmation").toString().trim();
+	}
+	if(conf != "Yes")
+	{
+		skippedCount = skippedCount + 1;
+		continue;
+	}
+	matchedCount = matchedCount + 1;
+	leadId = lead.get("id");
+	ftAtt = lead.get("Fresh_LEP_FT_Attendance");
+	recMap = Map();
+	recMap.put("id",leadId);
+	needsUpdate = false;
+	ftBlank = ftAtt == null || ftAtt == "-None-" || ftAtt.toString().trim() == "" || ftAtt.toString().trim() == "null";
+	if(check_type == "first")
+	{
+		if(ftBlank)
+		{
+			recMap.put("Fresh_LEP_FT_Attendance","No");
+			needsUpdate = true;
+		}
+	}
+	else if(check_type == "hour")
+	{
+		inPresent = false;
+		leadEmail = lead.get("Email");
+		if(leadEmail != null && leadEmail.trim() != "" && leadEmail != "null")
+		{
+			emailL = leadEmail.toLowerCase().trim();
+			if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+			{
+				peCsv = "," + present_emails.toLowerCase() + ",";
+				if(peCsv.contains("," + emailL + ","))
+				{
+					inPresent = true;
+				}
+			}
+		}
+		if(inPresent)
+		{
+			cur = "";
+			if(ftAtt != null)
+			{
+				cur = ftAtt.toString().trim();
+			}
+			if(cur == "No" || cur == "Absent" || ftBlank)
+			{
+				recMap.put("Fresh_LEP_FT_Attendance","Yes");
+				needsUpdate = true;
+			}
+		}
+	}
+	else
+	{
+		// T+30 final safety net
+		inEverJoined = false;
+		inPresent = false;
+		leadEmail = lead.get("Email");
+		if(leadEmail != null && leadEmail.trim() != "" && leadEmail != "null")
+		{
+			emailL = leadEmail.toLowerCase().trim();
+			if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+			{
+				peCsv = "," + present_emails.toLowerCase() + ",";
+				if(peCsv.contains("," + emailL + ","))
+				{
+					inPresent = true;
+				}
+			}
+			if(ever_joined_emails != null && ever_joined_emails.trim() != "" && ever_joined_emails != "null")
+			{
+				ejCsv = "," + ever_joined_emails.toLowerCase() + ",";
+				if(ejCsv.contains("," + emailL + ","))
+				{
+					inEverJoined = true;
+				}
+			}
+		}
+		if(ftBlank)
+		{
+			if(inPresent)
+			{
+				recMap.put("Fresh_LEP_FT_Attendance","Yes");
+			}
+			else if(inEverJoined)
+			{
+				recMap.put("Fresh_LEP_FT_Attendance","No");
+			}
+			else
+			{
+				recMap.put("Fresh_LEP_FT_Attendance","Absent");
+			}
+			needsUpdate = true;
+		}
+		else if(ftAtt.toString() == "Yes")
+		{
+			// already attended — skip
+		}
+		else if(ftAtt.toString() == "No")
+		{
+			if(inPresent)
+			{
+				recMap.put("Fresh_LEP_FT_Attendance","Yes");
+				needsUpdate = true;
+			}
+			else if(!inEverJoined)
+			{
+				recMap.put("Fresh_LEP_FT_Attendance","Absent");
+				needsUpdate = true;
+			}
+		}
+	}
+	if(needsUpdate)
+	{
+		updateList.add(recMap);
+	}
+	else
+	{
+		skippedCount = skippedCount + 1;
+	}
+}
+// --- Present in Zoom by email: Yes only if Confirmation = Yes ---
+makeupCount = 0;
+if(check_type == "final" || check_type == "hour" || check_type == "first")
+{
+	if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+	{
+		presentList = present_emails.toLowerCase().trim().toList(",");
+		updateIds = ",";
+		for each um in updateList
+		{
+			updateIds = updateIds + um.get("id").toString() + ",";
+		}
+		for each pe in presentList
+		{
+			em = pe.trim();
+			if(em == "")
+			{
+				continue;
+			}
+			foundLeads = zoho.crm.searchRecords("Leads","(Email:equals:" + em + ")",1,5);
+			if(foundLeads != null && foundLeads.size() > 0)
+			{
+				fLead = foundLeads.get(0);
+				fConf = "";
+				if(fLead.get("Fresh_LEP_FT_Confirmation") != null)
+				{
+					fConf = fLead.get("Fresh_LEP_FT_Confirmation").toString().trim();
+				}
+				if(fConf != "Yes")
+				{
+					info "FLEP-FT present-by-email skip (Confirmation not Yes): " + em;
+					continue;
+				}
+				fId = fLead.get("id").toString();
+				if(updateIds.contains("," + fId + ","))
+				{
+					for each um in updateList
+					{
+						if(um.get("id").toString() == fId)
+						{
+							um.put("Fresh_LEP_FT_Attendance","Yes");
+						}
+					}
+				}
+				else
+				{
+					fAtt = fLead.get("Fresh_LEP_FT_Attendance");
+					fCur = "";
+					if(fAtt != null)
+					{
+						fCur = fAtt.toString().trim();
+					}
+					recMap = Map();
+					recMap.put("id",fId);
+					recMap.put("Fresh_LEP_FT_Attendance","Yes");
+					updateList.add(recMap);
+					updateIds = updateIds + fId + ",";
+					makeupCount = makeupCount + 1;
+					matchedCount = matchedCount + 1;
+					info "FLEP-FT present-by-email Yes: " + em + " id=" + fId + " was=" + fCur;
+				}
+			}
+		}
+	}
+}
+info "FLEP-FT present-by-email extras queued: " + makeupCount;
+updatedCount = 0;
+failedCount = 0;
+chunkNum = 0;
+chunk = List();
+for each recMap in updateList
+{
+	chunk.add(recMap);
+	if(chunk.size() == 100)
+	{
+		chunkNum = chunkNum + 1;
+		bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+		chunkOk = 0;
+		chunkFail = 0;
+		if(bulkResp != null)
+		{
+			for each row in bulkResp
+			{
+				if(row.get("status") == "success")
+				{
+					chunkOk = chunkOk + 1;
+				}
+				else
+				{
+					chunkFail = chunkFail + 1;
+				}
+			}
+		}
+		updatedCount = updatedCount + chunkOk;
+		failedCount = failedCount + chunkFail;
+		info "FLEP-FT bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail;
+		chunk = List();
+	}
+}
+if(chunk.size() > 0)
+{
+	chunkNum = chunkNum + 1;
+	bulkResp = zoho.crm.bulkUpdate("Leads",chunk);
+	chunkOk = 0;
+	chunkFail = 0;
+	if(bulkResp != null)
+	{
+		for each row in bulkResp
+		{
+			if(row.get("status") == "success")
+			{
+				chunkOk = chunkOk + 1;
+			}
+			else
+			{
+				chunkFail = chunkFail + 1;
+			}
+		}
+	}
+	updatedCount = updatedCount + chunkOk;
+	failedCount = failedCount + chunkFail;
+	info "FLEP-FT bulkUpdate chunk" + chunkNum + " sent=" + chunk.size() + " ok=" + chunkOk + " fail=" + chunkFail;
+}
+info "FLEP-FT checkpoint: type=" + check_type + " matched=" + matchedCount + " updated=" + updatedCount + " failed=" + failedCount + " skipped=" + skippedCount + " chunks=" + chunkNum;
+if(failedCount > 0)
+{
+	sendmail
+	[
+		from :zoho.loginuserid
+		to :"ironladytech@gmail.com"
+		subject :"Fresh LEP FT Attendance checkpoint - " + failedCount + " updates FAILED (" + session_att_date + ")"
+		message :"<p>Fresh LEP FT batch attendance update had failures.</p><p>Type: " + check_type + "<br>Session: " + session_att_date + "<br>Matched: " + matchedCount + "<br>Updated OK: " + updatedCount + "<br><b>Failed: " + failedCount + "</b></p>"
+	]
+}
+}

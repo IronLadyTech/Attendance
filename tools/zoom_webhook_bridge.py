@@ -100,6 +100,16 @@ _MC_MEETING_KEYWORDS = _DAY1_KEYWORDS + _DAY2_KEYWORDS
 
 _100BM_KEYWORDS = ["orientation session", "fast track your leadership growth"]
 
+# Fresh LEP FT (Thursday) — topic "Fast Track Session - Iron Lady"; 8 PM IST anchor
+# Callers: /fresh-lep-ft route → Zoho Flow Fresh_LEP_FT_Attendance
+# User: "Fast Track Session - Iron Lady meeting topic, timigs- 8pm"
+_FLEP_FT_KEYWORDS = ["fast track session"]
+_FLEP_FT_CHECKPOINT_1 = int(os.environ.get("FLEP_FT_CHECKPOINT_1_SECONDS", "900"))
+_FLEP_FT_CHECKPOINT_2 = int(os.environ.get("FLEP_FT_CHECKPOINT_2_SECONDS", "1800"))
+_FLEP_FT_CHECKPOINT_3 = int(os.environ.get("FLEP_FT_CHECKPOINT_3_SECONDS", "3600"))
+_FLEP_FT_ANCHOR_HOUR_IST = int(os.environ.get("FLEP_FT_ANCHOR_HOUR_IST", "20"))
+_FLEP_FT_ANCHOR_MINUTE_IST = int(os.environ.get("FLEP_FT_ANCHOR_MINUTE_IST", "0"))
+
 # LEP meeting topics (any match → LEP route). Override via LEP_TOPIC_KEYWORDS=a,b,c
 _LEP_TOPIC_KEYWORDS_DEFAULT = [
     "il lep sessions",
@@ -132,6 +142,10 @@ _mc_lock = threading.Lock()
 # 100BM per-meeting roster + checkpoint timers
 _100bm_meetings: dict[str, dict] = {}
 _100bm_lock = threading.Lock()
+
+# Fresh LEP FT per-meeting roster + checkpoint timers
+_flep_ft_meetings: dict[str, dict] = {}
+_flep_ft_lock = threading.Lock()
 
 # LEP per-meeting roster + checkpoint timers + check history
 _lep_meetings: dict[str, dict] = {}
@@ -223,6 +237,11 @@ def _is_100bm_topic(topic: str) -> bool:
     return any(kw in topic_l for kw in _100BM_KEYWORDS)
 
 
+def _is_flep_ft_topic(topic: str) -> bool:
+    topic_l = topic.lower()
+    return any(kw in topic_l for kw in _FLEP_FT_KEYWORDS)
+
+
 def _is_lep_topic(topic: str) -> bool:
     if not topic:
         return False
@@ -271,6 +290,22 @@ def _lep_checkpoint_anchor(session_date: str) -> datetime:
     day = datetime.strptime(session_date, "%Y-%m-%d").date()
     anchor = datetime(day.year, day.month, day.day, 9, 0, 0, tzinfo=_IST)
     return anchor.astimezone(timezone.utc)
+
+
+def _flep_ft_fixed_anchor_iso(session_date: str) -> str:
+    """Hard-coded Fresh LEP FT start: 8:00 PM IST on the session date."""
+    try:
+        y, m, d = (int(x) for x in session_date[:10].split("-"))
+    except ValueError:
+        now = datetime.now(_IST)
+        y, m, d = now.year, now.month, now.day
+    return datetime(
+        y, m, d,
+        _FLEP_FT_ANCHOR_HOUR_IST,
+        _FLEP_FT_ANCHOR_MINUTE_IST,
+        0,
+        tzinfo=_IST,
+    ).isoformat()
 
 
 def _100bm_fixed_anchor_iso(session_date: str) -> str:
@@ -1051,6 +1086,268 @@ def _handle_100bm_participant_left(body: dict) -> None:
     _bridge_persist()
 
 
+# --- Fresh LEP FT checkpoint model (same T+15/T+30/T+60 as 100BM, 8 PM IST) ---
+# Topic: "Fast Track Session - Iron Lady". Zoho: Confirmation=Yes → Fresh_LEP_FT_Attendance.
+
+def _flep_ft_base_payload(state: dict) -> dict:
+    return {
+        "meeting_id": state["meeting_id"],
+        "meeting_topic": state["topic"],
+        "topic": state["topic"],
+        "start_time": state["start_time"],
+        "session_date": state["session_date"],
+        "batch_date": state["session_date"],
+        "program": "FLEP_FT",
+    }
+
+
+def _flep_ft_mark_yes(forward_url: str, state: dict, email: str, name: str, join_time: str) -> None:
+    payload = _flep_ft_base_payload(state)
+    payload.update({
+        "event": "attendance.mark_yes",
+        "participant_email": email,
+        "participant_name": name,
+        "join_time": join_time,
+    })
+    _post_to_zoho(forward_url, payload, "flep-ft-yes")
+
+
+def _flep_ft_mark_no(forward_url: str, state: dict, email: str, name: str, join_time: str) -> None:
+    payload = _flep_ft_base_payload(state)
+    payload.update({
+        "event": "attendance.mark_no",
+        "participant_email": email,
+        "participant_name": name,
+        "join_time": join_time,
+    })
+    _post_to_zoho(forward_url, payload, "flep-ft-no")
+
+
+def _flep_ft_lookup_participant(forward_url: str, state: dict, email: str, name: str, join_time: str) -> None:
+    payload = _flep_ft_base_payload(state)
+    payload.update({
+        "event": "attendance.lookup",
+        "participant_email": email,
+        "participant_name": name,
+        "join_time": join_time,
+    })
+    _post_to_zoho(forward_url, payload, "flep-ft-lookup")
+
+
+def _flep_ft_sweep(meeting_id: str, sweep: int) -> None:
+    with _flep_ft_lock:
+        state = _flep_ft_meetings.get(meeting_id)
+        if not state:
+            sys.stderr.write(f"[flep-ft/sweep{sweep}] No state for meeting={meeting_id}\n")
+            return
+        roster = dict(state["roster"])
+        ever_joined = dict(state.get("ever_joined", {}))
+        forward_url = state["forward_url"]
+
+    sys.stderr.write(
+        f"[flep-ft/sweep{sweep}] meeting={meeting_id} roster={len(roster)} "
+        f"ever_joined={len(ever_joined)} topic={state['topic']!r} session={state['session_date']}\n"
+    )
+
+    event = _checkpoint_event(sweep)
+    payload = _flep_ft_base_payload(state)
+    payload["event"] = event
+    payload["ever_joined_emails"] = _ever_joined_email_csv(ever_joined)
+    payload["present_emails"] = _roster_email_csv(roster)
+    _post_to_zoho(forward_url, payload, f"flep-ft-sweep{sweep}")
+
+    for info in roster.values():
+        email = info.get("email", "")
+        name = info.get("name", "")
+        if not email and not name:
+            continue
+        _flep_ft_mark_yes(forward_url, state, email, name, info.get("join_time", ""))
+
+    if sweep == 1:
+        roster_keys = set(roster.keys())
+        for rkey, info in ever_joined.items():
+            if rkey in roster_keys:
+                continue
+            email = info.get("email", "")
+            name = info.get("name", "")
+            if not email and not name:
+                continue
+            _flep_ft_lookup_participant(forward_url, state, email, name, info.get("join_time", ""))
+
+    if sweep == 2:
+        roster_keys = set(roster.keys())
+        for rkey, info in ever_joined.items():
+            if rkey in roster_keys:
+                continue
+            email = info.get("email", "")
+            name = info.get("name", "")
+            if not email and not name:
+                continue
+            _flep_ft_mark_no(forward_url, state, email, name, info.get("join_time", ""))
+
+
+def _flep_ft_cancel_timers(state: dict) -> None:
+    for t in state.get("timers", []):
+        t.cancel()
+
+
+def _flep_ft_schedule_checkpoints(meeting_id: str, state: dict) -> None:
+    session_date = state.get("session_date") or _session_date_ist(state.get("start_time", ""))
+    state["session_date"] = session_date
+    state["checkpoint_anchor"] = _flep_ft_fixed_anchor_iso(session_date)
+    state["planned_start_time"] = state["checkpoint_anchor"]
+    state["checkpoint_anchor_source"] = (
+        f"fixed_{_FLEP_FT_ANCHOR_HOUR_IST:02d}:{_FLEP_FT_ANCHOR_MINUTE_IST:02d}_IST"
+    )
+    _schedule_checkpoint_timers(
+        meeting_id,
+        state,
+        sweep_fn=_flep_ft_sweep,
+        delays=[
+            (1, _FLEP_FT_CHECKPOINT_1),
+            (2, _FLEP_FT_CHECKPOINT_2),
+            (3, _FLEP_FT_CHECKPOINT_3),
+        ],
+        log_prefix="flep-ft/started",
+        use_mlm=False,
+    )
+
+
+def _handle_flep_ft_meeting_started(body: dict, forward_url: str) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    topic = obj.get("topic", "")
+    if not _is_flep_ft_topic(topic):
+        sys.stderr.write(f"[flep-ft/started] Not a Fresh LEP FT topic (topic={topic!r}) — skipping\n")
+        return
+
+    meeting_id = str(obj.get("id", ""))
+    start_time = obj.get("start_time", "")
+    session_date = _session_date_ist(start_time)
+
+    with _flep_ft_lock:
+        existing = _flep_ft_meetings.get(meeting_id)
+        roster: dict = {}
+        ever_joined: dict = {}
+        if existing:
+            roster = dict(existing.get("roster", {}))
+            ever_joined = dict(existing.get("ever_joined", {}))
+            _flep_ft_cancel_timers(existing)
+
+        state = {
+            "meeting_id": meeting_id,
+            "topic": topic,
+            "start_time": start_time,
+            "session_date": session_date,
+            "forward_url": forward_url,
+            "roster": roster,
+            "ever_joined": ever_joined,
+            "timers": [],
+        }
+        _flep_ft_schedule_checkpoints(meeting_id, state)
+        _flep_ft_meetings[meeting_id] = state
+
+    sys.stderr.write(
+        f"[flep-ft/started] meeting={meeting_id} session={session_date} roster={len(roster)}\n"
+    )
+
+
+def _handle_flep_ft_participant_joined(body: dict, forward_url: str) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    participant = obj.get("participant", {})
+    meeting_id = str(obj.get("id", ""))
+    email = participant.get("email", "").strip()
+    name = participant.get("user_name", "").strip()
+    join_time = participant.get("join_time", "")
+    topic = obj.get("topic", "")
+
+    if not _is_flep_ft_topic(topic):
+        sys.stderr.write(f"[flep-ft/join] Not a Fresh LEP FT topic (topic={topic!r}) — skipping\n")
+        return
+
+    rkey = _mc_roster_key(email, name)
+    if not rkey:
+        sys.stderr.write("[flep-ft/join] Missing email and name — skipping roster\n")
+        return
+
+    with _flep_ft_lock:
+        state = _flep_ft_meetings.get(meeting_id)
+        if state is None:
+            session_date = _session_date_ist(join_time or obj.get("start_time", ""))
+            state = {
+                "meeting_id": meeting_id,
+                "topic": topic,
+                "start_time": obj.get("start_time", join_time),
+                "session_date": session_date,
+                "forward_url": forward_url,
+                "roster": {},
+                "ever_joined": {},
+                "timers": [],
+            }
+            _flep_ft_meetings[meeting_id] = state
+            _flep_ft_schedule_checkpoints(meeting_id, state)
+            sys.stderr.write(
+                f"[flep-ft/join] Roster + checkpoints recovered meeting={meeting_id}\n"
+            )
+        elif not state.get("timers"):
+            _flep_ft_schedule_checkpoints(meeting_id, state)
+
+        pinfo = {
+            "email": email,
+            "name": name,
+            "join_time": join_time,
+        }
+        state["roster"][rkey] = pinfo
+        state.setdefault("ever_joined", {})[rkey] = pinfo
+
+    sys.stderr.write(f"[flep-ft/join] Roster +1 {email or name} meeting={meeting_id}\n")
+
+
+def _handle_flep_ft_participant_left(body: dict) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    participant = obj.get("participant", {})
+    meeting_id = str(obj.get("id", ""))
+    email = participant.get("email", "").strip()
+    name = participant.get("user_name", "").strip()
+    topic = obj.get("topic", "")
+
+    if not _is_flep_ft_topic(topic):
+        return
+
+    rkey = _mc_roster_key(email, name)
+    if not rkey:
+        return
+
+    with _flep_ft_lock:
+        state = _flep_ft_meetings.get(meeting_id)
+        if state and rkey in state.get("roster", {}):
+            state["roster"].pop(rkey, None)
+            sys.stderr.write(
+                f"[flep-ft/left] Roster -1 {email or name} meeting={meeting_id}\n"
+            )
+
+
+def _handle_flep_ft_meeting_ended(body: dict, forward_url: str) -> None:
+    obj = body.get("payload", {}).get("object", {})
+    topic = obj.get("topic", "")
+    meeting_id = str(obj.get("id", ""))
+    if not _is_flep_ft_topic(topic):
+        return
+    with _flep_ft_lock:
+        state = _flep_ft_meetings.pop(meeting_id, None)
+        if state:
+            _flep_ft_cancel_timers(state)
+    sys.stderr.write(f"[flep-ft/ended] meeting={meeting_id} (no attendance action)\n")
+    _post_to_zoho(forward_url, {
+        "event": "meeting.ended",
+        "meeting_id": meeting_id,
+        "start_time": obj.get("start_time", ""),
+        "topic": topic,
+        "meeting_topic": topic,
+        "program": "FLEP_FT",
+        "session_date": _session_date_ist(obj.get("start_time", "")),
+    }, "flep-ft-ended")
+
+
 # --- LEP checkpoint model (3 samples + majority final) ---
 
 def _lep_majority(present_flags: list[bool]) -> str:
@@ -1673,6 +1970,8 @@ def make_handler(
     secret_lep: str = "",
     forward_url_lep: str = "",
     lep_secrets: dict[str, str] | None = None,
+    secret_flep_ft: str = "",
+    forward_url_flep_ft: str = "",
 ):
     """lep_secrets maps path → Zoom secret, e.g. {"/lep": "...", "/lep2": "..."}."""
     _lep_by_path = dict(lep_secrets or {})
@@ -1682,9 +1981,11 @@ def make_handler(
     class H(BaseHTTPRequestHandler):
         _secret = secret
         _secret_100bm = secret_100bm
+        _secret_flep_ft = secret_flep_ft
         _lep_secrets = _lep_by_path
         _forward_url = forward_url
         _forward_url_100bm = forward_url_100bm or forward_url
+        _forward_url_flep_ft = forward_url_flep_ft or forward_url
         _forward_url_lep = forward_url_lep or forward_url
 
         def log_message(self, fmt: str, *args) -> None:
@@ -1700,6 +2001,10 @@ def make_handler(
                 if not self._secret_100bm:
                     return None
                 return self._secret_100bm, "100BM", self._forward_url_100bm
+            if path == "/fresh-lep-ft":
+                if not self._secret_flep_ft:
+                    return None
+                return self._secret_flep_ft, "FLEP_FT", self._forward_url_flep_ft
             return self._secret, "", self._forward_url
 
         def _handle_internal_lep(self, raw: bytes) -> None:
@@ -1766,6 +2071,8 @@ def make_handler(
             if route is None:
                 if path == "/100bm":
                     err = '{"error":"/100bm disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_100BM"}'
+                elif path == "/fresh-lep-ft":
+                    err = '{"error":"/fresh-lep-ft disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_FLEP_FT"}'
                 elif path.startswith("/lep"):
                     err = '{"error":"LEP route disabled: set ZOOM_WEBHOOK_SECRET_TOKEN_LEP (and _LEP_2/_3/_4 for extra accounts)"}'
                 else:
@@ -1829,6 +2136,18 @@ def make_handler(
                         _handle_100bm_participant_left(body)
                     elif event == "meeting.ended":
                         _handle_meeting_ended(body, route_forward, program)
+                    else:
+                        self._forward(raw, route_forward)
+                        return
+                elif program == "FLEP_FT":
+                    if event == "meeting.started":
+                        _handle_flep_ft_meeting_started(body, route_forward)
+                    elif event == "meeting.participant_joined":
+                        _handle_flep_ft_participant_joined(body, route_forward)
+                    elif event == "meeting.participant_left":
+                        _handle_flep_ft_participant_left(body)
+                    elif event == "meeting.ended":
+                        _handle_flep_ft_meeting_ended(body, route_forward)
                     else:
                         self._forward(raw, route_forward)
                         return
@@ -1903,6 +2222,8 @@ def make_handler(
                 active_mc = len(_mc_meetings)
             with _100bm_lock:
                 active_100bm = len(_100bm_meetings)
+            with _flep_ft_lock:
+                active_flep_ft = len(_flep_ft_meetings)
             with _lep_lock:
                 active_lep = len(_lep_meetings)
             resp = json.dumps({
@@ -1914,12 +2235,19 @@ def make_handler(
                 "100bm_checkpoint_1_seconds": _BM100_CHECKPOINT_1,
                 "100bm_checkpoint_2_seconds": _BM100_CHECKPOINT_2,
                 "100bm_checkpoint_3_seconds": _BM100_CHECKPOINT_3,
+                "flep_ft_checkpoint_1_seconds": _FLEP_FT_CHECKPOINT_1,
+                "flep_ft_checkpoint_2_seconds": _FLEP_FT_CHECKPOINT_2,
+                "flep_ft_checkpoint_3_seconds": _FLEP_FT_CHECKPOINT_3,
+                "flep_ft_anchor_ist": f"{_FLEP_FT_ANCHOR_HOUR_IST:02d}:{_FLEP_FT_ANCHOR_MINUTE_IST:02d}",
+                "flep_ft_keywords": _FLEP_FT_KEYWORDS,
                 "lep_delays_day1": _LEP_DELAYS_DAY1,
                 "lep_delays_day2": _LEP_DELAYS_DAY2,
                 "active_mc_meetings": active_mc,
                 "active_100bm_meetings": active_100bm,
+                "active_flep_ft_meetings": active_flep_ft,
                 "active_lep_meetings": active_lep,
                 "route_100bm": bool(self._secret_100bm),
+                "route_flep_ft": bool(self._secret_flep_ft),
                 "route_lep": bool(self._lep_secrets),
                 "lep_routes": sorted(self._lep_secrets.keys()),
                 "lep_durable_redis": _lep_redis.durable_lep_enabled(),
@@ -1964,10 +2292,12 @@ def main() -> None:
     _lep_redis.run_redis_connectivity_test()
     secret = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN", "").strip()
     secret_100bm = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_100BM", "").strip()
+    secret_flep_ft = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_FLEP_FT", "").strip()
     secret_lep = os.environ.get("ZOOM_WEBHOOK_SECRET_TOKEN_LEP", "").strip()
     lep_secrets = _load_lep_secrets()
     forward = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL", "").strip()
     forward_100bm = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL_100BM", "").strip()
+    forward_flep_ft = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL_FLEP_FT", "").strip()
     forward_lep = os.environ.get("ZOHO_WEBHOOK_FORWARD_URL_LEP", "").strip()
 
     # Durable LEP without QStash records rosters but fires no checkpoints — the
@@ -2009,9 +2339,12 @@ def main() -> None:
         secret_lep,
         forward_lep,
         lep_secrets=lep_secrets,
+        secret_flep_ft=secret_flep_ft,
+        forward_url_flep_ft=forward_flep_ft,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler)
     route_100bm = "/100bm enabled" if secret_100bm else "/100bm disabled"
+    route_flep_ft = "/fresh-lep-ft enabled" if secret_flep_ft else "/fresh-lep-ft disabled"
     route_lep = (
         f"enabled {sorted(lep_secrets.keys())}" if lep_secrets else "disabled"
     )
@@ -2025,12 +2358,16 @@ def main() -> None:
         f"MC checkpoints     : T+{_MC_CHECKPOINT_1}s (first), T+{_MC_CHECKPOINT_2}s (final), T+{_MC_CHECKPOINT_3}s (hour)\n"
         f"100BM checkpoints: T+{_BM100_CHECKPOINT_1}s / T+{_BM100_CHECKPOINT_2}s / T+{_BM100_CHECKPOINT_3}s "
         f"from {_BM100_ANCHOR_HOUR_IST:02d}:{_BM100_ANCHOR_MINUTE_IST:02d} IST\n"
+        f"FLEP-FT checkpoints: T+{_FLEP_FT_CHECKPOINT_1}s / T+{_FLEP_FT_CHECKPOINT_2}s / T+{_FLEP_FT_CHECKPOINT_3}s "
+        f"from {_FLEP_FT_ANCHOR_HOUR_IST:02d}:{_FLEP_FT_ANCHOR_MINUTE_IST:02d} IST\n"
         f"LEP checkpoints  : Day1 {_LEP_DELAYS_DAY1} / Day2 {_LEP_DELAYS_DAY2} (9:00 AM IST anchor)\n"
         f"Day 1 keywords     : {_DAY1_KEYWORDS}\n"
         f"Day 2 keywords     : {_DAY2_KEYWORDS}\n"
         f"100BM keywords     : {_100BM_KEYWORDS}\n"
+        f"FLEP-FT keywords   : {_FLEP_FT_KEYWORDS}\n"
         f"LEP topic keywords : {_lep_topic_keywords()}\n"
         f"100BM route        : {route_100bm}\n"
+        f"FLEP-FT route      : {route_flep_ft}\n"
         f"LEP routes         : {route_lep}\n"
         f"LEP durable        : redis={'on' if _lep_redis.durable_lep_enabled() else 'off'} "
         f"qstash={'on' if _lep_qstash.qstash_configured() else 'off'}\n"
@@ -2039,6 +2376,7 @@ def main() -> None:
         f"Forward URL        : {forward}\n"
         "MC /               : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
         "100BM /100bm       : meeting.started → roster → T+15/T+30/T+60 sweeps\n"
+        "FLEP-FT /fresh-lep-ft : Fast Track Session → 8:15/8:30/9:00 PM IST\n"
         f"{lep_mode_line}"
         "meeting.ended      : MC Completed trigger only (no attendance at end)",
         flush=True,
