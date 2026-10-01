@@ -157,6 +157,18 @@ for each lead in allLeads
 				}
 			}
 		}
+		if(!inPresent && lead.get("Secondary_Email") != null && lead.get("Secondary_Email").toString().trim() != "" && lead.get("Secondary_Email").toString().trim() != "null")
+		{
+			secL = lead.get("Secondary_Email").toString().trim().toLowerCase();
+			if(present_emails != null && present_emails.trim() != "" && present_emails != "null")
+			{
+				peCsv = "," + present_emails.toLowerCase() + ",";
+				if(peCsv.contains("," + secL + ","))
+				{
+					inPresent = true;
+				}
+			}
+		}
 		if(inPresent)
 		{
 			cur = "";
@@ -192,6 +204,26 @@ for each lead in allLeads
 			{
 				ejCsv = "," + ever_joined_emails.toLowerCase() + ",";
 				if(ejCsv.contains("," + emailL + ","))
+				{
+					inEverJoined = true;
+				}
+			}
+		}
+		if(lead.get("Secondary_Email") != null && lead.get("Secondary_Email").toString().trim() != "" && lead.get("Secondary_Email").toString().trim() != "null")
+		{
+			secL = lead.get("Secondary_Email").toString().trim().toLowerCase();
+			if(!inPresent && present_emails != null && present_emails.trim() != "" && present_emails != "null")
+			{
+				peCsv = "," + present_emails.toLowerCase() + ",";
+				if(peCsv.contains("," + secL + ","))
+				{
+					inPresent = true;
+				}
+			}
+			if(!inEverJoined && ever_joined_emails != null && ever_joined_emails.trim() != "" && ever_joined_emails != "null")
+			{
+				ejCsv = "," + ever_joined_emails.toLowerCase() + ",";
+				if(ejCsv.contains("," + secL + ","))
 				{
 					inEverJoined = true;
 				}
@@ -260,7 +292,21 @@ if(check_type == "final" || check_type == "hour" || check_type == "first")
 				continue;
 			}
 			foundLeads = zoho.crm.searchRecords("Leads","(Email:equals:" + em + ")",1,5);
-			if(foundLeads != null && foundLeads.size() > 0)
+			foundStr = "";
+			if(foundLeads != null)
+			{
+				foundStr = foundLeads.toString();
+			}
+			if(foundLeads == null || !foundStr.startsWith("[") || foundLeads.size() == 0)
+			{
+				foundLeads = zoho.crm.searchRecords("Leads","(Secondary_Email:equals:" + em + ")",1,5);
+				foundStr = "";
+				if(foundLeads != null)
+				{
+					foundStr = foundLeads.toString();
+				}
+			}
+			if(foundStr.startsWith("[") && foundLeads.size() > 0)
 			{
 				fLead = foundLeads.get(0);
 				fConf = "";

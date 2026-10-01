@@ -39,13 +39,31 @@ if(session_date == null || session_date.trim() == "" || session_date == "null")
 	return;
 }
 lead_list = List();
-// --- Find lead by email ---
+email_matched = false;
+// --- Find lead by primary or secondary email ---
 if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
 {
-	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")",1,5);
-	if(ls != null && ls.size() > 0)
+	emailFields = List();
+	emailFields.add("Email");
+	emailFields.add("Secondary_Email");
+	for each emailField in emailFields
 	{
-		lead_list.add(ls.get(0));
+		if(email_matched)
+		{
+			break;
+		}
+		ls = zoho.crm.searchRecords("Leads","(" + emailField + ":equals:" + participant_email.trim() + ")",1,5);
+		lsStr = "";
+		if(ls != null)
+		{
+			lsStr = ls.toString();
+		}
+		isErr = lsStr.contains("\"status\":\"error\"") || lsStr.contains("INVALID_QUERY") || lsStr.contains("INVALID_DATA");
+		if(ls != null && !isErr && ls.size() > 0)
+		{
+			lead_list.add(ls.get(0));
+			email_matched = true;
+		}
 	}
 }
 // --- Name fallback ---
@@ -101,6 +119,32 @@ if(lead_list == null || lead_list.size() == 0)
 		}
 	}
 }
+// Name match must not update a different person's lead when Zoom sent another email.
+if(!email_matched && lead_list != null && lead_list.size() > 0 && participant_email != null && participant_email.trim() != "" && participant_email != "null")
+{
+	zoomEm = participant_email.trim().toLowerCase();
+	nameLead = lead_list.get(0);
+	emailOk = false;
+	leadEm = "";
+	if(nameLead.get("Email") != null)
+	{
+		leadEm = nameLead.get("Email").toString().trim().toLowerCase();
+	}
+	leadSec = "";
+	if(nameLead.get("Secondary_Email") != null)
+	{
+		leadSec = nameLead.get("Secondary_Email").toString().trim().toLowerCase();
+	}
+	if(leadEm == zoomEm || (leadSec != "" && leadSec == zoomEm))
+	{
+		emailOk = true;
+	}
+	if(!emailOk)
+	{
+		info "FLEP-FT YES: name match rejected — Zoom email differs from lead " + nameLead.get("id") + " — sheet instead";
+		lead_list = List();
+	}
+}
 if(lead_list == null || lead_list.size() == 0)
 {
 	info "FLEP-FT YES: lead not found - adding to unmatched sheet";
@@ -133,6 +177,11 @@ if(lead_list == null || lead_list.size() == 0)
 }
 lead = lead_list.get(0);
 lead_id = lead.get("id").toString();
+fullLead = zoho.crm.getRecordById("Leads",lead_id);
+if(fullLead != null && fullLead.get("id") != null)
+{
+	lead = fullLead;
+}
 // --- Gate: Confirmation must be Yes ---
 conf = "";
 if(lead.get("Fresh_LEP_FT_Confirmation") != null)
@@ -141,7 +190,32 @@ if(lead.get("Fresh_LEP_FT_Confirmation") != null)
 }
 if(conf != "Yes")
 {
-	info "FLEP-FT YES: skip — Confirmation not Yes (conf=" + conf + ") lead=" + lead_id;
+	info "FLEP-FT YES: skip CRM — Confirmation not Yes (conf=" + conf + ") lead=" + lead_id + " — logging Zoom person to unmatched sheet";
+	safe_name = "";
+	if(participant_name != null)
+	{
+		safe_name = participant_name.replaceAll("\"","'");
+	}
+	safe_email = "";
+	if(participant_email != null)
+	{
+		safe_email = participant_email.replaceAll("\"","'");
+	}
+	timestamp_str = zoho.currenttime.toString("yyyy-MM-dd HH:mm:ss");
+	json_data_str = '[{"Timestamp":"' + timestamp_str + '","Name":"' + safe_name + '","Email":"' + safe_email + '","Session":"Fresh LEP FT","Duration (mins)":"15+"}]';
+	sheet_param = Map();
+	sheet_param.put("method","worksheet.jsondata.append");
+	sheet_param.put("worksheet_name","Sheet1");
+	sheet_param.put("header_row","1");
+	sheet_param.put("json_data",json_data_str);
+	sheet_response = invokeurl
+	[
+		url :"https://sheet.zoho.in/api/v2/6n2nqc1869b674fcd4c47a645f30a6f38fb05"
+		type :POST
+		parameters:sheet_param
+		connection:"zoho_sheet_mc"
+	];
+	info "FLEP-FT YES confirmation-skip sheet: " + sheet_response.toString();
 	return;
 }
 existing = "";

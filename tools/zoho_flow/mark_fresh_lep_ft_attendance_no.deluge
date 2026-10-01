@@ -37,12 +37,30 @@ if(session_date == null || session_date.trim() == "" || session_date == "null")
 	return;
 }
 lead_list = List();
+email_matched = false;
 if(participant_email != null && participant_email.trim() != "" && participant_email != "null")
 {
-	ls = zoho.crm.searchRecords("Leads","(Email:equals:" + participant_email + ")",1,5);
-	if(ls != null && ls.size() > 0)
+	emailFields = List();
+	emailFields.add("Email");
+	emailFields.add("Secondary_Email");
+	for each emailField in emailFields
 	{
-		lead_list.add(ls.get(0));
+		if(email_matched)
+		{
+			break;
+		}
+		ls = zoho.crm.searchRecords("Leads","(" + emailField + ":equals:" + participant_email.trim() + ")",1,5);
+		lsStr = "";
+		if(ls != null)
+		{
+			lsStr = ls.toString();
+		}
+		isErr = lsStr.contains("\"status\":\"error\"") || lsStr.contains("INVALID_QUERY") || lsStr.contains("INVALID_DATA");
+		if(ls != null && !isErr && ls.size() > 0)
+		{
+			lead_list.add(ls.get(0));
+			email_matched = true;
+		}
 	}
 }
 if(lead_list == null || lead_list.size() == 0)
@@ -75,6 +93,31 @@ if(lead_list == null || lead_list.size() == 0)
 				lead_list = zoho.crm.searchRecords("Leads","(Last_Name:equals:" + name_tc + ")",1,5);
 			}
 		}
+	}
+}
+if(!email_matched && lead_list != null && lead_list.size() > 0 && participant_email != null && participant_email.trim() != "" && participant_email != "null")
+{
+	zoomEm = participant_email.trim().toLowerCase();
+	nameLead = lead_list.get(0);
+	emailOk = false;
+	leadEm = "";
+	if(nameLead.get("Email") != null)
+	{
+		leadEm = nameLead.get("Email").toString().trim().toLowerCase();
+	}
+	leadSec = "";
+	if(nameLead.get("Secondary_Email") != null)
+	{
+		leadSec = nameLead.get("Secondary_Email").toString().trim().toLowerCase();
+	}
+	if(leadEm == zoomEm || (leadSec != "" && leadSec == zoomEm))
+	{
+		emailOk = true;
+	}
+	if(!emailOk)
+	{
+		info "FLEP-FT NO: name match rejected — Zoom email differs from lead " + nameLead.get("id");
+		lead_list = List();
 	}
 }
 if(lead_list == null || lead_list.size() == 0)
